@@ -149,6 +149,15 @@ docs](https://docs.ultralytics.com/datasets/detect/) for the general format.
 If you've regenerated or edited labels in place, delete the matching `*/labels.cache` first —
 cache validity is keyed on label path + total size, not content or mtime.
 
+For stage-2 fine-tuning with novel classes, put a YOLO-txt `train`/`val` split at
+`<repo_root>/hotspot-ship/images/{train,val}` + matching `labels/`, then run
+`conda run -n mu python scripts/build_finetune_kshot.py` to generate `finetune_kshot/`
+(gitignored, symlinked from `COCO/` + `hotspot-ship/`) and the checked-in
+`cfg/finetune_k{1,3,5,10,30}.yaml` files it's built for. These give class-balanced k-shot
+training sets (COCO's 80 base classes + `hot-spot`/`ship` all sampled to ~k boxes each) with
+a fixed, unsampled val set (full COCO val2017 + full hotspot-ship val) — re-run the script
+after any change to `hotspot-ship/` or `COCO/` to regenerate.
+
 ## Usage
 
 **Stage 1 — pretrain** (whole dataset, distillation on):

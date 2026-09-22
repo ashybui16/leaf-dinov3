@@ -1,5 +1,7 @@
 COCO/
 VisDrone/
+hotspot-ship/
+finetune_kshot/
 dinov3/
 my-ultralytics/
 runs/
