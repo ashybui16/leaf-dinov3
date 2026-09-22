@@ -1,0 +1,15 @@
+# Datasets and training outputs -- never needed inside the image
+/COCO/
+/VisDrone/
+/hotspot-ship/
+/finetune_kshot/
+/runs/
+
+# VCS metadata for the vendored dinov3 / my-ultralytics clones
+**/.git
+
+# Byte-code / test caches
+**/__pycache__
+/.pytest_cache/
+
+/cfg/.resolved_*.yaml

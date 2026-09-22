@@ -1,0 +1,9 @@
+# `path:` is repo-root-relative, resolved by leaf_dinov3.data.resolve_dataset_yaml. Used as
+# the default --novel-yaml by scripts/build_finetune_kshot.py.
+path: hotspot-ship
+train: images/train
+val: images/val
+
+names:
+  0: hot-spot
+  1: ship

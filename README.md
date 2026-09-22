@@ -152,11 +152,17 @@ cache validity is keyed on label path + total size, not content or mtime.
 For stage-2 fine-tuning with novel classes, put a YOLO-txt `train`/`val` split at
 `<repo_root>/hotspot-ship/images/{train,val}` + matching `labels/`, then run
 `conda run -n mu python scripts/build_finetune_kshot.py` to generate `finetune_kshot/`
-(gitignored, symlinked from `COCO/` + `hotspot-ship/`) and the checked-in
-`cfg/finetune_k{1,3,5,10,30}.yaml` files it's built for. These give class-balanced k-shot
-training sets (COCO's 80 base classes + `hot-spot`/`ship` all sampled to ~k boxes each) with
-a fixed, unsampled val set (full COCO val2017 + full hotspot-ship val) — re-run the script
-after any change to `hotspot-ship/` or `COCO/` to regenerate.
+(gitignored, copied from `COCO/` + `hotspot-ship/` — self-contained, not symlinked, so it's
+portable to e.g. a Docker volume mount) and the checked-in `cfg/finetune_k{1,3,5,10,30}.yaml`
+files it's built for. These give class-balanced k-shot training sets (COCO's 80 base classes
++ `hot-spot`/`ship` all sampled to ~k boxes each) with a fixed, unsampled val set (full COCO
+val2017 + full hotspot-ship val) — re-run the script after any change to `hotspot-ship/` or
+`COCO/` to regenerate.
+
+`build_finetune_kshot.py` isn't hardcoded to COCO + hotspot-ship: `--base-yaml`/`--novel-yaml`
+(defaults `cfg/coco.yaml` / `cfg/hotspot_ship.yaml`) each take any dataset yaml of this repo's
+standard shape (`path`, `train`, `val`, `names`) — the novel dataset's classes are appended
+after the base dataset's, matching `check_class_order`'s tail-append contract.
 
 ## Usage
 
