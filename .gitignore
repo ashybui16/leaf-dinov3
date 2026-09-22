@@ -1,0 +1,10 @@
+COCO/
+VisDrone/
+dinov3/
+my-ultralytics/
+runs/
+*.pt
+*.pth
+*.cache
+__pycache__/
+cfg/.resolved_*.yaml

@@ -1,0 +1,23 @@
+# Dependencies for the leaf_dinov3 package, scripts, and tests.
+#
+# Install torch separately FIRST if you need a GPU build (a plain `pip install -r
+# requirements.txt` fetches the platform-default wheel, which is CPU-only on most systems) --
+# see README.md's "Environment setup" for the exact command and CUDA-version notes, then run
+# `pip install -r requirements.txt` to fill in the rest; it will see torch already satisfies
+# `>=2.4.1` and leave it alone.
+#
+# `ultralytics` and DINOv3's own requirements (dinov3/requirements.txt) are deliberately NOT
+# listed here -- they are NOT `pip install -r requirements.txt` dependencies of this repo, they
+# are separate clones you set up per README.md's "Environment setup" before this file matters:
+#   - `my-ultralytics/` (a LEAF-YOLO-capable Ultralytics fork), installed editable
+#     (`pip install -e my-ultralytics`) so `import ultralytics` resolves to it -- installing
+#     plain `ultralytics` from PyPI instead would silently lose the LEAF-YOLO model support
+#   - `dinov3/`, imported directly via sys.path (leaf_dinov3/teacher.py) rather than
+#     pip-installed; we only ever touch dinov3.hub.backbones and the vision transformer /
+#     attention modules underneath it, which need nothing beyond torch and numpy (hubconf.py's
+#     own eager imports pull in torchmetrics/ftfy/submitit/etc. for entrypoints -- segmentors,
+#     detectors, dinotxt -- we never use, which is why we bypass it; see README.md)
+torch>=2.4.1
+numpy
+pyyaml
+pytest
