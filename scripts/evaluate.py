@@ -31,6 +31,23 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="number of base classes; if set, also report base vs. novel (index >= this) mAP",
     )
+
+    # yolo val arguments (default=None: falls back to ultralytics' own default)
+    p.add_argument("--device", type=str, default=None)
+    p.add_argument("--workers", type=int, default=None)
+    p.add_argument("--conf", type=float, default=None)
+    p.add_argument("--iou", type=float, default=None, help="NMS IoU threshold")
+    p.add_argument("--max-det", type=int, default=None)
+    p.add_argument("--half", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--dnn", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--rect", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--save-json", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--plots", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--project", type=str, default=None)
+    p.add_argument("--name", type=str, default=None)
+    p.add_argument("--exist-ok", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=None)
+
     return p.parse_args()
 
 
@@ -42,9 +59,26 @@ def main() -> None:
         model.strip_distillation()
     model.eval()
 
-    validator = DetectionValidator(
-        args={"data": resolve_dataset_yaml(args.data), "imgsz": args.imgsz, "batch": args.batch, "split": args.split}
-    )
+    val_args = {"data": resolve_dataset_yaml(args.data), "imgsz": args.imgsz, "batch": args.batch, "split": args.split}
+    extra = {
+        "device": args.device,
+        "workers": args.workers,
+        "conf": args.conf,
+        "iou": args.iou,
+        "max_det": args.max_det,
+        "half": args.half,
+        "dnn": args.dnn,
+        "rect": args.rect,
+        "save_json": args.save_json,
+        "plots": args.plots,
+        "project": args.project,
+        "name": args.name,
+        "exist_ok": args.exist_ok,
+        "verbose": args.verbose,
+    }
+    val_args.update({k: v for k, v in extra.items() if v is not None})
+
+    validator = DetectionValidator(args=val_args)
     validator(model=model)
     metric = validator.metrics.box
 
