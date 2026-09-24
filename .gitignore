@@ -10,3 +10,5 @@ runs/
 *.cache
 __pycache__/
 cfg/.resolved_*.yaml
+*.tar
+*.zip

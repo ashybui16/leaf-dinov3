@@ -37,7 +37,7 @@ _DEFAULT_WEIGHTS = {
 }
 
 
-def _load_backbone(variant: str, weights: str, pretrained: bool = True):
+def _load_backbone(variant: str, weights: str | None, pretrained: bool = True):
     """Build a DINOv3 backbone via `dinov3.hub.backbones` directly, bypassing `hubconf.py`.
 
     `torch.hub.load(..., source="local")` execs the whole `hubconf.py`, which eagerly imports
@@ -93,7 +93,7 @@ class DinoV3Teacher(nn.Module):
         super().__init__()
         if pretrained and weights is None:
             weights = DINOV3_DIR / "weights" / _DEFAULT_WEIGHTS[variant]
-        self.model = _load_backbone(variant, str(weights) if weights else "", pretrained=pretrained)
+        self.model = _load_backbone(variant, str(weights) if weights else None, pretrained=pretrained)
 
         self.variant = variant
         self.input_size = input_size
