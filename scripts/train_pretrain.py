@@ -21,7 +21,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--teacher-variant", default=None)
     p.add_argument("--teacher-weights", default=None)
     p.add_argument("--teacher-input-size", type=int, default=None)
-    p.add_argument("--attn-grid", type=int, default=20)
     p.add_argument("--attn-num-heads", type=int, default=8)
     p.add_argument("--lambda-distill", type=float, default=1.0)
     p.add_argument("--epochs", type=int, default=None)
@@ -169,7 +168,6 @@ def main() -> None:
         teacher_weights=args.teacher_weights,
         teacher_input_size=args.teacher_input_size,
         lambda_distill=args.lambda_distill,
-        attn_grid=args.attn_grid,
         attn_num_heads=args.attn_num_heads,
     )
     trainer.train()

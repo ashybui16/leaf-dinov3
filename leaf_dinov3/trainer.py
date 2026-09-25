@@ -26,7 +26,6 @@ class DistillTrainer(DetectionTrainer):
         teacher_weights: str | None = None,
         teacher_input_size: int | None = None,
         lambda_distill: float = 1.0,
-        attn_grid: int = 20,
         attn_num_heads: int = 8,
     ):
         self.variant = variant
@@ -34,7 +33,6 @@ class DistillTrainer(DetectionTrainer):
         self.teacher_weights = teacher_weights
         self.teacher_input_size = teacher_input_size
         self.lambda_distill = lambda_distill
-        self.attn_grid = attn_grid
         self.attn_num_heads = attn_num_heads
         super().__init__(cfg=cfg, overrides=overrides, _callbacks=_callbacks)
 
@@ -49,7 +47,6 @@ class DistillTrainer(DetectionTrainer):
             teacher_weights=self.teacher_weights,
             teacher_input_size=self.teacher_input_size,
             lambda_distill=self.lambda_distill,
-            attn_grid=self.attn_grid,
             attn_num_heads=self.attn_num_heads,
         )
 
@@ -68,7 +65,7 @@ class DistillFineTuneTrainer(DistillTrainer):
 
     `model=<stage-1 .pt>` is required: `BaseTrainer.setup_model` unpickles the whole
     `DistillDetectionModel` (teacher included) and hands it to `get_model` as `weights`. No
-    teacher/d3 args are needed: `variant`/`teacher_variant`/`teacher_input_size`/`attn_grid`/
+    teacher/d3 args are needed: `variant`/`teacher_variant`/`teacher_input_size`/
     `attn_num_heads` are all read back off the checkpoint itself, so a freshly-built model can
     never end up architecturally mismatched with the checkpoint it's about to load. This
     matters beyond a state_dict shape check for `attn_num_heads`: `SelfAttentionMap`'s q/k
@@ -97,7 +94,6 @@ class DistillFineTuneTrainer(DistillTrainer):
             teacher_input_size=weights.teacher.input_size,
             teacher_pretrained=False,
             lambda_distill=self.lambda_distill,
-            attn_grid=weights.attn_grid,
             attn_num_heads=attn_num_heads,
         )
         model.load(weights)

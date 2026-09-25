@@ -12,7 +12,7 @@ import torch
 from ultralytics.nn.tasks import DetectionModel
 
 from .heads import DistillDetectD2, DistillDetectD3
-from .losses import attention_distill_loss, embedding_distill_loss, resize_attention_map
+from .losses import attention_distill_loss, embedding_distill_loss
 from .teacher import DinoV3Teacher
 
 _HEAD_CLASSES = {"d2": DistillDetectD2, "d3": DistillDetectD3}
@@ -33,7 +33,6 @@ class DistillDetectionModel(DetectionModel):
         teacher_input_size: int | None = None,
         teacher_pretrained: bool = True,
         lambda_distill: float = 1.0,
-        attn_grid: int = 20,
         attn_num_heads: int = 8,
     ):
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
@@ -41,7 +40,6 @@ class DistillDetectionModel(DetectionModel):
             raise ValueError(f"Unknown distillation variant {variant!r}; available: {sorted(_HEAD_CLASSES)}")
         self.variant = variant
         self.lambda_distill = lambda_distill
-        self.attn_grid = attn_grid
 
         old = self.model[-1]
         ch_levels = tuple(seq[0].conv.in_channels for seq in old.cv2)  # infers 3 or 4 levels
@@ -55,7 +53,7 @@ class DistillDetectionModel(DetectionModel):
             pretrained=teacher_pretrained,
         )
 
-        extra = {"attn_grid": attn_grid, "attn_num_heads": attn_num_heads} if variant == "d3" else {}
+        extra = {"attn_num_heads": attn_num_heads} if variant == "d3" else {}
         new = _HEAD_CLASSES[variant](
             nc=old.nc, reg_max=old.reg_max, end2end=end2end, ch=ch_levels, distill_dim=self.teacher.embed_dim, **extra
         )
@@ -92,9 +90,7 @@ class DistillDetectionModel(DetectionModel):
         if self.variant == "d3":
             loss = loss + embedding_distill_loss(p["dino_box_embed"], teacher_out["patch_tokens"])
             teacher_grid = teacher_out["patch_tokens"].shape[-1]
-            with torch.no_grad():
-                teacher_attn = resize_attention_map(teacher_out["attn_map"], teacher_grid, self.attn_grid)
-            loss = loss + attention_distill_loss(p["dino_attn"], teacher_attn)
+            loss = loss + attention_distill_loss(p["dino_attn"], teacher_out["attn_map"], teacher_grid)
         return loss
 
     def expand_num_classes(self, new_nc: int) -> None:

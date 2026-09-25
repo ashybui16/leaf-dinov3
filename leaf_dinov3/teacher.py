@@ -57,10 +57,14 @@ class _RopeAwareAttention:
     whole model, teacher included. Storing the state on a module-level callable instead of a
     closure keeps the class trivially picklable; the only reference cycle is `attn <-> self`,
     which pickle's object memoization handles fine.
+
+    The stashed map is a separate per-head softmax over patch keys only (the first `n_prefix`
+    CLS/storage tokens dropped), head-averaged; the real output still uses full attention.
     """
 
-    def __init__(self, attn: nn.Module) -> None:
+    def __init__(self, attn: nn.Module, n_prefix: int) -> None:
         self.attn = attn
+        self.n_prefix = n_prefix
 
     def __call__(self, qkv: torch.Tensor, attn_bias=None, rope=None) -> torch.Tensor:
         attn = self.attn
@@ -70,8 +74,10 @@ class _RopeAwareAttention:
         q, k, v = (t.transpose(1, 2) for t in qkv.reshape(B, N, 3, h, C // h).unbind(2))
         if rope is not None:
             q, k = attn.apply_rope(q, k, rope)
-        w = (q @ k.transpose(-2, -1) * attn.scale).softmax(dim=-1)
-        attn.last_attn = w.mean(dim=1)  # head-average -> (B, N, N)
+        logits = q @ k.transpose(-2, -1) * attn.scale
+        w = logits.softmax(dim=-1)
+        n = self.n_prefix
+        attn.last_attn = logits[..., n:, n:].softmax(dim=-1).mean(dim=1)  # patch-only, head-avg
         return (w @ v).transpose(1, 2).reshape(B, N, C)
 
 
@@ -122,14 +128,14 @@ class DinoV3Teacher(nn.Module):
         RoPE is applied *inside* `SelfAttention.compute_attention`, so a qkv-forward-hook would
         miss the rotation and compute wrong attention. `_RopeAwareAttention` mirrors the
         original SDPA math exactly (same scale, no mask, no dropout) and additionally stores
-        the head-averaged softmax weights on the wrapped `attn` module.
+        the head-averaged patch-only softmax weights on the wrapped `attn` module.
         """
         attn = self.model.blocks[-1].attn
-        attn.compute_attention = _RopeAwareAttention(attn)
+        attn.compute_attention = _RopeAwareAttention(attn, self.n_storage_tokens + 1)
 
     @property
     def _attn(self) -> torch.Tensor:
-        """The last block's head-averaged attention from the most recent forward pass."""
+        """The last block's head-averaged patch-only attention from the most recent forward pass."""
         return self.model.blocks[-1].attn.last_attn
 
     @property
@@ -154,6 +160,5 @@ class DinoV3Teacher(nn.Module):
         patch_tokens = self.model.get_intermediate_layers(x, n=1, reshape=True, norm=True)[0]
         out = {"patch_tokens": patch_tokens}
         if self.need_attention:
-            n = self.n_storage_tokens + 1
-            out["attn_map"] = self._attn[:, n:, n:]
+            out["attn_map"] = self._attn
         return out

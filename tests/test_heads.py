@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from leaf_dinov3.heads import DistillDetectD2, DistillDetectD3  # noqa: E402
 
 DISTILL_DIM = 16
-ATTN_GRID = 4
 ATTN_HEADS = 2
 
 
@@ -133,10 +132,10 @@ def test_d3_forward_shapes(ch, end2end):
         end2end=end2end,
         ch=ch,
         distill_dim=DISTILL_DIM,
-        attn_grid=ATTN_GRID,
         attn_num_heads=ATTN_HEADS,
     )
-    head.stride = torch.tensor([8.0 * 2**i for i in range(len(ch))])
+    p2 = len(ch) == 4
+    head.stride = torch.tensor([(4.0 if p2 else 8.0) * 2**i for i in range(len(ch))])
     head.train()
     x = _feats(bs, ch)
     preds = head(x)
@@ -153,8 +152,9 @@ def test_d3_forward_shapes(ch, end2end):
     for i, embed in enumerate(o2m["dino_box_embed"]):
         h = 40 // 2**i
         assert embed.shape == (bs, DISTILL_DIM, h, h)
-    for attn in o2m["dino_attn"]:
-        assert attn.shape == (bs, ATTN_GRID * ATTN_GRID, ATTN_GRID * ATTN_GRID)
+    for i, attn in enumerate(o2m["dino_attn"]):
+        h = 40 // 2 ** max(i, int(p2))  # P2 attention runs at P3 size
+        assert attn.shape == (bs, h * h, h * h)
         row_sums = attn.sum(dim=-1)
         assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-4)
 
@@ -170,7 +170,7 @@ def test_d3_bias_init_does_not_clobber_box_distill_tail():
     ch = (64, 128, 256)
     reg_max = 16
     head = DistillDetectD3(
-        nc=10, reg_max=reg_max, end2end=False, ch=ch, distill_dim=DISTILL_DIM, attn_grid=ATTN_GRID
+        nc=10, reg_max=reg_max, end2end=False, ch=ch, distill_dim=DISTILL_DIM
     )
     head.stride = torch.tensor([8.0, 16.0, 32.0])
     before = [seq[-1].bias.data[4 * reg_max :].clone() for seq in head.cv2]
@@ -186,7 +186,7 @@ def test_d3_bias_init_does_not_clobber_box_distill_tail():
 def test_d3_strip_distillation_restores_stock_shapes():
     ch = (64, 128, 256)
     nc, reg_max = 10, 16
-    head = DistillDetectD3(nc=nc, reg_max=reg_max, end2end=True, ch=ch, distill_dim=DISTILL_DIM, attn_grid=ATTN_GRID)
+    head = DistillDetectD3(nc=nc, reg_max=reg_max, end2end=True, ch=ch, distill_dim=DISTILL_DIM)
     head.stride = torch.tensor([8.0, 16.0, 32.0])
     head.bias_init()
     head.strip_distillation()
@@ -212,7 +212,7 @@ def test_d3_expand_num_classes_leaves_box_branch_untouched():
     """cv2/self_attn don't depend on nc, so D3 can reuse D2's expand_num_classes unchanged."""
     ch = (64, 128, 256)
     nc, reg_max, new_nc = 10, 16, 12
-    head = DistillDetectD3(nc=nc, reg_max=reg_max, end2end=True, ch=ch, distill_dim=DISTILL_DIM, attn_grid=ATTN_GRID)
+    head = DistillDetectD3(nc=nc, reg_max=reg_max, end2end=True, ch=ch, distill_dim=DISTILL_DIM)
     head.stride = torch.tensor([8.0, 16.0, 32.0])
     head.bias_init()
 

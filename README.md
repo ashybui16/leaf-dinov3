@@ -176,10 +176,10 @@ conda run -n mu python scripts/train_pretrain.py \
 
 Key flags: `--variant {d2,d3}`, `--teacher-variant`, `--teacher-weights` (local `.pth`,
 defaults to the matching file in `dinov3/weights/`), `--teacher-input-size` (defaults to
-`imgsz`, so the teacher grid tracks the student's), `--attn-grid` / `--attn-num-heads` (d3
-only — the box-branch embedding is pooled to `attn_grid x attn_grid` before the attention
-term), `--lambda-distill`, `--fraction` (dataset subset; `>1` = image count, or `[train,
-val]` list), `--offline` (sets `YOLO_OFFLINE=1`, must precede any network dependent import),
+`imgsz`, so the teacher grid tracks the student's), `--attn-num-heads` (d3 only — the box-branch
+attention runs at each level's native resolution, with P2 resized to P3's size, and the
+teacher's patch-only attention is resized to each level), `--lambda-distill`, `--fraction`
+(dataset subset; `>1` = image count, or `[train, val]` list), `--offline` (sets `YOLO_OFFLINE=1`, must precede any network dependent import),
 and `--smoke` — a fast, low-VRAM profile (`yolo26n-leaf.yaml`, `dinov3_vits16`, imgsz 320,
 batch 2, epochs 1, `fraction=[8, 8]`) for quick local/CI-style sanity checks on any machine,
 including CPU-only, vs. the full-scale defaults (`yolo26s-leaf.yaml`, `dinov3_vitb16`, imgsz
@@ -195,7 +195,7 @@ conda run -n mu python scripts/train_finetune.py \
 ```
 
 No teacher/variant flags: `DistillFineTuneTrainer` reads `variant`, `teacher_variant`,
-`teacher_input_size`, `attn_grid`, and `attn_num_heads` straight off the unpickled stage-1
+`teacher_input_size`, and `attn_num_heads` straight off the unpickled stage-1
 checkpoint, so the rebuilt scaffold can never end up architecturally mismatched with the
 checkpoint it's about to load. `--data`'s first N class names must match `--pretrain-data`
 exactly, in order (`check_class_order`, run before training starts) — novel classes go

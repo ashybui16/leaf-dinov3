@@ -48,13 +48,11 @@ def test_attention_matches_unwrapped():
     assert torch.allclose(ref_out, wrapped_out, atol=1e-4)
     assert t_wrapped._attn is not None
 
-    attn = t_wrapped._attn
+    attn = t_wrapped._attn  # patch-only: CLS/storage keys dropped before the softmax
+    n_patch = (320 // t_wrapped.patch_size) ** 2
+    assert attn.shape == (2, n_patch, n_patch)
     row_sums = attn.sum(dim=-1)
     assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-4)
-
-    n = t_wrapped.n_storage_tokens + 1
-    patch_only_sums = attn[:, n:, n:].sum(dim=-1)
-    assert (patch_only_sums <= 1.0 + 1e-4).all()
 
 
 if __name__ == "__main__":

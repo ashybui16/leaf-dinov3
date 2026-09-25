@@ -57,19 +57,35 @@ def test_resize_attention_map_downsamples_shape():
     assert resized.shape == (2, 16, 16)
 
 
+def test_resize_attention_map_upsamples_with_unit_row_sums():
+    attn = _random_attention(2, 4)
+    resized = resize_attention_map(attn, in_grid=4, out_grid=8)
+    assert resized.shape == (2, 64, 64)
+    assert torch.allclose(resized.sum(dim=-1), torch.ones(2, 64), atol=1e-5)
+
+
 def test_attention_distill_loss_zero_on_identical_inputs():
     teacher = _random_attention(2, 4)
-    loss = attention_distill_loss([teacher.clone(), teacher.clone()], teacher)
+    loss = attention_distill_loss([teacher.clone(), teacher.clone()], teacher, teacher_grid=4)
     assert torch.allclose(loss, torch.zeros(()), atol=1e-6)
 
 
 def test_attention_distill_loss_gradient_flows_to_student():
     teacher = _random_attention(2, 4)
     student = torch.rand(2, 16, 16, requires_grad=True)
-    loss = attention_distill_loss([student], teacher)
+    loss = attention_distill_loss([student], teacher, teacher_grid=4)
     loss.backward()
     assert student.grad is not None
     assert torch.any(student.grad != 0)
+
+
+def test_attention_distill_loss_per_level_grids():
+    teacher = _random_attention(2, 4)
+    students = [_random_attention(2, 8), _random_attention(2, 4), _random_attention(2, 2)]
+    loss = attention_distill_loss(students, teacher, teacher_grid=4)
+    assert torch.isfinite(loss)
+    same = [resize_attention_map(teacher, 4, g) for g in (8, 4, 2)]
+    assert torch.allclose(attention_distill_loss(same, teacher, teacher_grid=4), torch.zeros(()), atol=1e-6)
 
 
 if __name__ == "__main__":

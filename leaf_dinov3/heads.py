@@ -111,12 +111,12 @@ class SelfAttentionMap(nn.Module):
 
 
 class DistillDetectD3(DistillDetectD2):
-    """D2 plus a box-branch embedding target and a pooled self-attention-map target.
+    """D2 plus a box-branch embedding target and a per-level self-attention-map target.
 
-    P2/4 at 640 is 160x160 = 25600 tokens, whose raw attention matrix would be ~2.6GB/image;
-    each level's box-tail embedding is pooled to `attn_grid` before attention to make this
-    tractable. The embedding regression itself (`dino_box_embed`) stays at native per-level
-    resolution, exactly like `dino_embed` on the cls branch.
+    Each level's attention runs on its box-tail embedding at native resolution, except P2/4:
+    at 640 it is 160x160 = 25600 tokens, whose raw attention matrix would be ~2.6GB/image, so
+    it is resized to P3's size first. The embedding regression itself (`dino_box_embed`) stays
+    at native per-level resolution for every level, exactly like `dino_embed` on the cls branch.
     """
 
     def __init__(
@@ -126,11 +126,9 @@ class DistillDetectD3(DistillDetectD2):
         end2end: bool = False,
         ch: tuple = (),
         distill_dim: int = 768,
-        attn_grid: int = 20,
         attn_num_heads: int = 8,
     ):
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch, distill_dim=distill_dim)
-        self.attn_grid = attn_grid
         for seq in self.cv2:
             _extend_last_conv(seq, distill_dim)
         self.self_attn = nn.ModuleList(SelfAttentionMap(distill_dim, attn_num_heads) for _ in range(self.nl))
@@ -153,8 +151,10 @@ class DistillDetectD3(DistillDetectD2):
         if box_head is self.cv2 and self.distill_dim:  # one2many only; o2o convs stay narrow
             box_embeds = [b[:, n_box:] for b in box_raw]  # kept SPATIAL, per level
             out["dino_box_embed"] = box_embeds
-            pooled = [F.adaptive_avg_pool2d(e, self.attn_grid) for e in box_embeds]
-            tokens = [p.flatten(2).transpose(1, 2) for p in pooled]  # (bs, attn_grid**2, distill_dim)
+            attn_in = list(box_embeds)
+            if self.stride[0] == 4:  # P2 present: attend at P3 size, 160x160 tokens is ~2.6GB/image
+                attn_in[0] = F.adaptive_avg_pool2d(attn_in[0], attn_in[1].shape[-2:])
+            tokens = [e.flatten(2).transpose(1, 2) for e in attn_in]  # (bs, H_i*W_i, distill_dim)
             out["dino_attn"] = [self.self_attn[i](t) for i, t in enumerate(tokens)]
         return out
 

@@ -42,7 +42,6 @@ def test_overfit_smoke(cfg, variant):
         variant=variant,
         teacher_variant="dinov3_vits16",
         lambda_distill=1.0,
-        attn_grid=5,
     )
     model.args = DEFAULT_CFG
     model.train()
