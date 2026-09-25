@@ -55,7 +55,14 @@ class DistillDetectionModel(DetectionModel):
 
         extra = {"attn_num_heads": attn_num_heads} if variant == "d3" else {}
         new = _HEAD_CLASSES[variant](
-            nc=old.nc, reg_max=old.reg_max, end2end=end2end, ch=ch_levels, distill_dim=self.teacher.embed_dim, **extra
+            nc=old.nc,
+            reg_max=old.reg_max,
+            end2end=end2end,
+            ch=ch_levels,
+            distill_dim=self.teacher.embed_dim,
+            strides=tuple(int(s) for s in old.stride),
+            target_stride=self.teacher.patch_size,
+            **extra,
         )
         new.stride = old.stride
         new.i, new.f, new.type = old.i, old.f, old.type

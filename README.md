@@ -21,8 +21,8 @@ finetune) is kept so a future custom dataset with novel classes can be added on 
 
 | | |
 |---|---|
-| **d2** | Cls-branch embeddings only. Widens `cv3`'s last conv by `embed_dim`; the extra channels regress the teacher's patch tokens per level. |
-| **d3** | d2, plus box-branch embeddings (`cv2` widened the same way) and a pooled self-attention-map term (`SelfAttentionMap`), matching the teacher's own (RoPE-aware) last-block attention. |
+| **d2** | Cls-branch embeddings only. Widens `cv3`'s last conv by `embed_dim`; the extra channels regress the teacher's patch tokens per level, after a learned student-side resampler maps each level onto the teacher's patch grid (3x3 stride-2 convs for finer levels, `DySample` for coarser ones). The teacher target is never passed through anything learned. |
+| **d3** | d2, plus box-branch embeddings (`cv2` widened and resampled the same way, with their own resamplers) and a self-attention-map term computed on the resampled embeddings (`SelfAttentionMap`), matching the teacher's own (RoPE-aware) last-block attention. |
 
 Distillation only ever trains through the **one2many** branch (see `leaf_dinov3/heads.py`
 docstrings / the design notes below for why) — `yolov8m` has no one2one branch and is
@@ -177,8 +177,9 @@ conda run -n mu python scripts/train_pretrain.py \
 Key flags: `--variant {d2,d3}`, `--teacher-variant`, `--teacher-weights` (local `.pth`,
 defaults to the matching file in `dinov3/weights/`), `--teacher-input-size` (defaults to
 `imgsz`, so the teacher grid tracks the student's), `--attn-num-heads` (d3 only — the box-branch
-attention runs at each level's native resolution, with P2 resized to P3's size, and the
-teacher's patch-only attention is resized to each level), `--lambda-distill`, `--fraction`
+attention runs on each level's embeddings after they are resampled onto the teacher grid, so it
+matches the teacher's patch-only attention shape; the teacher map is only resized when
+`--teacher-input-size` makes its grid differ from `imgsz / 16`), `--lambda-distill`, `--fraction`
 (dataset subset; `>1` = image count, or `[train, val]` list), `--offline` (sets `YOLO_OFFLINE=1`, must precede any network dependent import),
 and `--smoke` — a fast, low-VRAM profile (`yolo26n-leaf.yaml`, `dinov3_vits16`, imgsz 320,
 batch 2, epochs 1, `fraction=[8, 8]`) for quick local/CI-style sanity checks on any machine,

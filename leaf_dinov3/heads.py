@@ -20,14 +20,79 @@ def _extend_last_conv(branch: nn.Sequential, extra: int) -> None:
     branch[-1] = new
 
 
-class DistillDetectD2(Detect):
-    """Detect head widened with per-level DINOv3 patch-embedding targets on the cls branch."""
+class DySample(nn.Module):
+    """Learned point-sampling upsampler (DySample, "lp" style): bilinear at init, offsets learned."""
 
-    def __init__(self, nc: int = 80, reg_max: int = 16, end2end: bool = False, ch: tuple = (), distill_dim: int = 768):
+    def __init__(self, dim: int, scale: int = 2, groups: int = 4):
+        super().__init__()
+        self.scale = scale
+        self.groups = groups
+        self.offset = nn.Conv2d(dim, 2 * groups * scale**2, kernel_size=1)
+        nn.init.normal_(self.offset.weight, std=0.001)
+        nn.init.zeros_(self.offset.bias)
+        h = torch.arange((1 - scale) / 2, (scale - 1) / 2 + 1) / scale
+        init_pos = torch.stack(torch.meshgrid([h, h], indexing="ij")).transpose(1, 2).repeat(1, groups, 1)
+        self.register_buffer("init_pos", init_pos.reshape(1, -1, 1, 1), persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """`x`: `(B, dim, H, W)` -> `(B, dim, scale*H, scale*W)`."""
+        b, _, h, w = x.shape
+        s = self.scale
+        offset = (self.offset(x) * 0.25 + self.init_pos).view(b, 2, -1, h, w)
+        ys = torch.arange(h, device=x.device, dtype=x.dtype) + 0.5
+        xs = torch.arange(w, device=x.device, dtype=x.dtype) + 0.5
+        coords = torch.stack(torch.meshgrid([xs, ys], indexing="ij")).transpose(1, 2).unsqueeze(1).unsqueeze(0)
+        normalizer = torch.tensor([w, h], dtype=x.dtype, device=x.device).view(1, 2, 1, 1, 1)
+        coords = 2 * (coords + offset) / normalizer - 1
+        coords = F.pixel_shuffle(coords.view(b, -1, h, w), s).view(b, 2, -1, s * h, s * w)
+        coords = coords.permute(0, 2, 3, 4, 1).contiguous().flatten(0, 1)
+        out = F.grid_sample(
+            x.reshape(b * self.groups, -1, h, w), coords, mode="bilinear", align_corners=False, padding_mode="border"
+        )
+        return out.view(b, -1, s * h, s * w)
+
+
+def _make_resampler(dim: int, stride: int, target_stride: int) -> nn.Module:
+    """Map a stride-`stride` embedding onto the teacher's stride-`target_stride` grid.
+
+    Finer levels get a chain of linear 3x3 stride-2 convs, coarser levels a `DySample`.
+    """
+    if stride <= target_stride:
+        n = int(math.log2(target_stride // stride))
+        assert stride * 2**n == target_stride, f"stride {stride} vs teacher {target_stride}: not a power of 2"
+        if n == 0:
+            return nn.Identity()
+        return nn.Sequential(*(nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1) for _ in range(n)))
+    scale = stride // target_stride
+    assert target_stride * scale == stride and scale & (scale - 1) == 0, (
+        f"stride {stride} vs teacher {target_stride}: not a power of 2"
+    )
+    return DySample(dim, scale)
+
+
+class DistillDetectD2(Detect):
+    """Detect head widened with per-level DINOv3 patch-embedding targets on the cls branch.
+
+    Each level's embedding is resampled onto the teacher's patch grid by a learned,
+    student-side resampler (`cls_resample`), so the teacher target is never touched.
+    """
+
+    def __init__(
+        self,
+        nc: int = 80,
+        reg_max: int = 16,
+        end2end: bool = False,
+        ch: tuple = (),
+        distill_dim: int = 768,
+        *,
+        strides: tuple,
+        target_stride: int = 16,
+    ):
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
         self.distill_dim = distill_dim
         for seq in self.cv3:
             _extend_last_conv(seq, distill_dim)
+        self.cls_resample = nn.ModuleList(_make_resampler(distill_dim, s, target_stride) for s in strides)
 
     def forward_head(
         self, x: list[torch.Tensor], box_head: nn.Module = None, cls_head: nn.Module = None
@@ -41,17 +106,18 @@ class DistillDetectD2(Detect):
         scores = torch.cat([c[:, : self.nc].reshape(bs, self.nc, -1) for c in cls_raw], dim=-1)
         out = {"boxes": boxes, "scores": scores, "feats": x}
         if cls_head is self.cv3 and self.distill_dim:  # one2many only; o2o convs stay narrow
-            out["dino_embed"] = [c[:, self.nc :] for c in cls_raw]  # kept SPATIAL, per level
+            out["dino_embed"] = [self.cls_resample[i](c[:, self.nc :]) for i, c in enumerate(cls_raw)]  # teacher grid
         return out
 
     def strip_distillation(self) -> None:
-        """Shrink `cv3` back to stock width and drop the distill tail."""
+        """Shrink `cv3` back to stock width and drop the distill tail and its resamplers."""
         for seq in self.cv3:
             old = seq[-1]
             new = nn.Conv2d(old.in_channels, self.nc, kernel_size=1)
             new.weight.data[:] = old.weight.data[: self.nc]
             new.bias.data[:] = old.bias.data[: self.nc]
             seq[-1] = new
+        del self.cls_resample
         self.distill_dim = 0
         self.np = sum(p.numel() for p in self.parameters())
 
@@ -113,10 +179,9 @@ class SelfAttentionMap(nn.Module):
 class DistillDetectD3(DistillDetectD2):
     """D2 plus a box-branch embedding target and a per-level self-attention-map target.
 
-    Each level's attention runs on its box-tail embedding at native resolution, except P2/4:
-    at 640 it is 160x160 = 25600 tokens, whose raw attention matrix would be ~2.6GB/image, so
-    it is resized to P3's size first. The embedding regression itself (`dino_box_embed`) stays
-    at native per-level resolution for every level, exactly like `dino_embed` on the cls branch.
+    The box-tail embeddings get their own learned resamplers (`box_resample`) onto the teacher
+    grid, and each level's attention runs on those resampled embeddings, so every level's
+    attention map has the teacher's own shape.
     """
 
     def __init__(
@@ -127,10 +192,22 @@ class DistillDetectD3(DistillDetectD2):
         ch: tuple = (),
         distill_dim: int = 768,
         attn_num_heads: int = 8,
+        *,
+        strides: tuple,
+        target_stride: int = 16,
     ):
-        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch, distill_dim=distill_dim)
+        super().__init__(
+            nc=nc,
+            reg_max=reg_max,
+            end2end=end2end,
+            ch=ch,
+            distill_dim=distill_dim,
+            strides=strides,
+            target_stride=target_stride,
+        )
         for seq in self.cv2:
             _extend_last_conv(seq, distill_dim)
+        self.box_resample = nn.ModuleList(_make_resampler(distill_dim, s, target_stride) for s in strides)
         self.self_attn = nn.ModuleList(SelfAttentionMap(distill_dim, attn_num_heads) for _ in range(self.nl))
 
     def forward_head(
@@ -147,14 +224,11 @@ class DistillDetectD3(DistillDetectD2):
         scores = torch.cat([c[:, : self.nc].reshape(bs, self.nc, -1) for c in cls_raw], dim=-1)
         out = {"boxes": boxes, "scores": scores, "feats": x}
         if cls_head is self.cv3 and self.distill_dim:  # one2many only; o2o convs stay narrow
-            out["dino_embed"] = [c[:, self.nc :] for c in cls_raw]  # kept SPATIAL, per level
+            out["dino_embed"] = [self.cls_resample[i](c[:, self.nc :]) for i, c in enumerate(cls_raw)]  # teacher grid
         if box_head is self.cv2 and self.distill_dim:  # one2many only; o2o convs stay narrow
-            box_embeds = [b[:, n_box:] for b in box_raw]  # kept SPATIAL, per level
+            box_embeds = [self.box_resample[i](b[:, n_box:]) for i, b in enumerate(box_raw)]  # teacher grid
             out["dino_box_embed"] = box_embeds
-            attn_in = list(box_embeds)
-            if self.stride[0] == 4:  # P2 present: attend at P3 size, 160x160 tokens is ~2.6GB/image
-                attn_in[0] = F.adaptive_avg_pool2d(attn_in[0], attn_in[1].shape[-2:])
-            tokens = [e.flatten(2).transpose(1, 2) for e in attn_in]  # (bs, H_i*W_i, distill_dim)
+            tokens = [e.flatten(2).transpose(1, 2) for e in box_embeds]  # (bs, H_t*W_t, distill_dim)
             out["dino_attn"] = [self.self_attn[i](t) for i, t in enumerate(tokens)]
         return out
 
@@ -174,7 +248,7 @@ class DistillDetectD3(DistillDetectD2):
                 b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)  # cls
 
     def strip_distillation(self) -> None:
-        """Shrink `cv2` and `cv3` back to stock width and drop the self-attention modules."""
+        """Shrink `cv2` and `cv3` back to stock width and drop the self-attention and resamplers."""
         super().strip_distillation()
         n_box = 4 * self.reg_max
         for seq in self.cv2:
@@ -183,5 +257,5 @@ class DistillDetectD3(DistillDetectD2):
             new.weight.data[:] = old.weight.data[:n_box]
             new.bias.data[:] = old.bias.data[:n_box]
             seq[-1] = new
-        del self.self_attn
+        del self.self_attn, self.box_resample
         self.np = sum(p.numel() for p in self.parameters())
