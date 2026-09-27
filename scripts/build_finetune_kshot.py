@@ -8,10 +8,12 @@ dataset's class count), matching the pretrain -> finetune class-order contract c
 
 For each k in --k-values, selects a training set where every class (base classes, then novel
 classes) has close to k boxes, using an independent per-class greedy sampling pass per k
-(TFA/DeFRCN-style seed generation). The val set (full base val + full novel val) is
-materialized once and shared, unsampled, across all k values. Images/labels are copied (not
-symlinked) into `finetune_kshot/`, so it's self-contained and portable (e.g. into a Docker
-volume mount) instead of depending on the source datasets' absolute host paths.
+(TFA/DeFRCN-style seed generation). The val set is materialized once and shared, unsampled,
+across all k values -- either the full base val + full novel val (--val-size all, the
+default), or a class-balanced sample built the same way as the k-shot train sets
+(--val-size <N>). Images/labels are copied (not symlinked) into the output directory, so
+it's self-contained and portable (e.g. into a Docker volume mount) instead of depending on
+the source datasets' absolute host paths.
 """
 
 from __future__ import annotations
@@ -40,14 +42,18 @@ class DatasetSpec:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--base-yaml", default="cfg/coco.yaml", help="dataset yaml whose classes keep their ids")
-    p.add_argument("--novel-yaml", default="cfg/hotspot_ship.yaml", help="dataset yaml appended at the tail")
+    p.add_argument("--base-yaml", required=True, help="dataset yaml whose classes keep their ids")
+    p.add_argument("--novel-yaml", required=True, help="dataset yaml appended at the tail")
     p.add_argument("--base-tag", default=None, help="output filename prefix for the base dataset (default: its yaml's stem)")
     p.add_argument("--novel-tag", default=None, help="output filename prefix for the novel dataset (default: its yaml's stem)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--k-values", default="1,3,5,10,30")
-    p.add_argument("--out-dir", default="finetune_kshot")
-    p.add_argument("--cfg-dir", default="cfg")
+    p.add_argument("--out-dir", default=None, help="output directory (default: '<base-tag>_<novel-tag>_kshot')")
+    p.add_argument(
+        "--val-size",
+        default="all",
+        help="per-class val sample size, selected the same way as --k-values, or 'all' for the full val set (default: all)",
+    )
     return p.parse_args()
 
 
@@ -82,11 +88,12 @@ def load_dataset(yaml_path: Path, tag: str | None, class_offset: int) -> Dataset
 
 def index_labels(
     ds: DatasetSpec,
+    split: str,
     all_counts: dict[tuple[str, str], Counter],
     class_index: dict[int, list[tuple[str, str]]],
     stem_to_file: dict[str, dict[str, str]],
 ) -> None:
-    images_dir, labels_dir = ds.images_dir["train"], ds.labels_dir["train"]
+    images_dir, labels_dir = ds.images_dir[split], ds.labels_dir[split]
     files: dict[str, str] = {}
     for p in images_dir.iterdir():
         if p.suffix.lower() not in IMAGE_EXTS:
@@ -166,14 +173,15 @@ def _write_label(src_label: Path, dst_label: Path, offset: int) -> None:
     dst_label.write_text("\n".join(remapped) + ("\n" if remapped else ""))
 
 
-def materialize_train(
+def materialize_split(
     selected: set[tuple[str, str]],
     stem_to_file: dict[str, dict[str, str]],
     datasets: dict[str, DatasetSpec],
+    split: str,
     out_dir: Path,
 ) -> None:
-    images_out = out_dir / "images" / "train"
-    labels_out = out_dir / "labels" / "train"
+    images_out = out_dir / "images" / split
+    labels_out = out_dir / "labels" / split
     if out_dir.exists():
         shutil.rmtree(out_dir)
     images_out.mkdir(parents=True)
@@ -182,11 +190,12 @@ def materialize_train(
     for tag, stem in selected:
         ds = datasets[tag]
         fname = stem_to_file[tag][stem]
-        shutil.copy2(ds.images_dir["train"] / fname, images_out / f"{tag}_{fname}")
-        _write_label(ds.labels_dir["train"] / f"{stem}.txt", labels_out / f"{tag}_{stem}.txt", ds.class_offset)
+        shutil.copy2(ds.images_dir[split] / fname, images_out / f"{tag}_{fname}")
+        _write_label(ds.labels_dir[split] / f"{stem}.txt", labels_out / f"{tag}_{stem}.txt", ds.class_offset)
 
 
-def materialize_val(datasets: dict[str, DatasetSpec], out_dir: Path) -> None:
+def materialize_val_all(datasets: dict[str, DatasetSpec], out_dir: Path) -> None:
+    """Copy every val image (base + novel), unsampled -- used when --val-size is 'all'."""
     images_out = out_dir / "images" / "val"
     labels_out = out_dir / "labels" / "val"
     if out_dir.exists():
@@ -205,21 +214,20 @@ def materialize_val(datasets: dict[str, DatasetSpec], out_dir: Path) -> None:
         print(f"--- val: {len(images)} {tag} images, {n_lbl} {tag} label files ---")
 
 
-def write_yaml(k: int, cfg_dir: Path, out_dir_name: str, names: dict[int, str]) -> None:
+def write_yaml(k: int, out_dir: Path, out_dir_name: str, names: dict[int, str]) -> None:
     data = {
         "path": out_dir_name,
         "train": f"k{k}/images/train",
         "val": "val/images/val",
         "names": names,
     }
-    (cfg_dir / f"finetune_k{k}.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    (out_dir / f"finetune_k{k}.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
 
 
 def main() -> None:
     args = parse_args()
     k_values = [int(k) for k in args.k_values.split(",")]
-    cfg_dir = REPO_ROOT / args.cfg_dir
-    out_root = REPO_ROOT / args.out_dir
+    val_size = None if args.val_size == "all" else int(args.val_size)
 
     base = load_dataset(REPO_ROOT / args.base_yaml, args.base_tag, class_offset=0)
     novel = load_dataset(REPO_ROOT / args.novel_yaml, args.novel_tag, class_offset=len(base.names))
@@ -229,24 +237,37 @@ def main() -> None:
     names = {**base.names, **novel.names}
     num_classes = len(names)
 
+    out_dir_name = args.out_dir or f"{base.tag}_{novel.tag}_kshot"
+    out_root = REPO_ROOT / out_dir_name
+
     if out_root.exists():
         shutil.rmtree(out_root)
 
-    all_counts: dict[tuple[str, str], Counter] = {}
-    class_index: dict[int, list[tuple[str, str]]] = {}
-    stem_to_file: dict[str, dict[str, str]] = {}
+    train_counts: dict[tuple[str, str], Counter] = {}
+    train_class_index: dict[int, list[tuple[str, str]]] = {}
+    train_stem_to_file: dict[str, dict[str, str]] = {}
     for ds in datasets.values():
-        index_labels(ds, all_counts, class_index, stem_to_file)
+        index_labels(ds, "train", train_counts, train_class_index, train_stem_to_file)
 
-    materialize_val(datasets, out_root / "val")
+    if val_size is None:
+        materialize_val_all(datasets, out_root / "val")
+    else:
+        val_counts: dict[tuple[str, str], Counter] = {}
+        val_class_index: dict[int, list[tuple[str, str]]] = {}
+        val_stem_to_file: dict[str, dict[str, str]] = {}
+        for ds in datasets.values():
+            index_labels(ds, "val", val_counts, val_class_index, val_stem_to_file)
+        selected, running = select_kshot(val_class_index, val_counts, val_size, num_classes, f"{args.seed}:val")
+        report_counts(val_size, running, names, selected)
+        materialize_split(selected, val_stem_to_file, datasets, "val", out_root / "val")
 
     for k in k_values:
-        selected, running = select_kshot(class_index, all_counts, k, num_classes, args.seed)
+        selected, running = select_kshot(train_class_index, train_counts, k, num_classes, args.seed)
         report_counts(k, running, names, selected)
-        materialize_train(selected, stem_to_file, datasets, out_root / f"k{k}")
-        write_yaml(k, cfg_dir, args.out_dir, names)
+        materialize_split(selected, train_stem_to_file, datasets, "train", out_root / f"k{k}")
+        write_yaml(k, out_root, out_dir_name, names)
 
-    print(f"--- done: wrote cfg/finetune_k{{{','.join(str(k) for k in k_values)}}}.yaml ---")
+    print(f"--- done: wrote {out_dir_name}/finetune_k{{{','.join(str(k) for k in k_values)}}}.yaml ---")
 
 
 if __name__ == "__main__":

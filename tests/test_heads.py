@@ -25,7 +25,9 @@ def _feats(bs: int, ch: tuple, base: int = 40):
 def test_forward_shapes(ch, end2end):
     nc, reg_max, bs = 10, 16, 2
     strides = [8 * 2**i for i in range(len(ch))]
-    head = DistillDetectD2(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch, distill_dim=DISTILL_DIM, strides=strides)
+    head = DistillDetectD2(
+        nc=nc, reg_max=reg_max, end2end=end2end, ch=ch, distill_dim=DISTILL_DIM, strides=strides, resize_student=True
+    )
     head.stride = torch.tensor(strides)
     head.train()
     x = _feats(bs, ch)
@@ -46,6 +48,22 @@ def test_forward_shapes(ch, end2end):
         assert "dino_embed" not in o2o
         assert o2o["boxes"].shape == (bs, 4 * reg_max, n_anchors)
         assert o2o["scores"].shape == (bs, nc, n_anchors)
+
+
+@pytest.mark.parametrize("ch", [(256, 512, 1024), (64, 128, 256, 512)], ids=["3lvl-yolov8m", "4lvl-leaf"])
+def test_forward_shapes_no_resize(ch):
+    nc, reg_max, bs = 10, 16, 2
+    strides = [8 * 2**i for i in range(len(ch))]
+    head = DistillDetectD2(
+        nc=nc, reg_max=reg_max, ch=ch, distill_dim=DISTILL_DIM, strides=strides, resize_student=False
+    )
+    head.stride = torch.tensor(strides)
+    head.train()
+    x = _feats(bs, ch)
+    preds = head(x)
+    for i, embed in enumerate(preds["dino_embed"]):
+        native = 40 // 2**i
+        assert embed.shape == (bs, DISTILL_DIM, native, native)
 
 
 def test_bias_init_does_not_clobber_cls_slice():
@@ -142,6 +160,7 @@ def test_d3_forward_shapes(ch, end2end):
         distill_dim=DISTILL_DIM,
         attn_num_heads=ATTN_HEADS,
         strides=strides,
+        resize_student=True,
     )
     head.stride = torch.tensor(strides)
     head.train()
@@ -237,6 +256,39 @@ def test_d3_expand_num_classes_leaves_box_branch_untouched():
         assert torch.equal(m.q.weight.data, old_self_attn_q_w[i])
     for seq in head.cv3:
         assert seq[-1].out_channels == new_nc + DISTILL_DIM
+
+
+@pytest.mark.parametrize("ch", [(256, 512, 1024), (64, 128, 256, 512)], ids=["3lvl-yolov8m", "4lvl-leaf"])
+def test_d3_forward_shapes_no_resize(ch):
+    nc, reg_max, bs = 10, 16, 2
+    p2 = len(ch) == 4
+    strides = [(4 if p2 else 8) * 2**i for i in range(len(ch))]
+    head = DistillDetectD3(
+        nc=nc,
+        reg_max=reg_max,
+        ch=ch,
+        distill_dim=DISTILL_DIM,
+        attn_num_heads=ATTN_HEADS,
+        strides=strides,
+        resize_student=False,
+    )
+    head.stride = torch.tensor(strides)
+    head.train()
+    x = _feats(bs, ch)
+    preds = head(x)
+    native_grids = [40 // 2**i for i in range(len(ch))]
+    for embed, g in zip(preds["dino_embed"] + preds["dino_box_embed"], native_grids * 2):
+        assert embed.shape[-2:] == (g, g)
+    # attention grids match native resolution, except P2 (level 0) is bilinearly resized to P3's
+    # (level 1's) grid first, so its attention matrix stays a manageable size
+    attn_grids = [native_grids[1] if p2 else native_grids[0], *native_grids[1:]]
+    for attn, g in zip(preds["dino_attn"], attn_grids):
+        assert attn.shape == (bs, g * g, g * g)
+        row_sums = attn.sum(dim=-1)
+        assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-4)
+    # remaining levels differ: confirms N_i tracks each level's own native grid, not a shared teacher grid
+    n_per_level = [a.shape[-1] for a in preds["dino_attn"]]
+    assert len(set(n_per_level)) == len(ch) - (1 if p2 else 0)
 
 
 def test_dysample_upsamples_and_learns():

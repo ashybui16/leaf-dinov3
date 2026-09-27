@@ -30,9 +30,10 @@ def _fake_batch(bs: int, imgsz: int, nc: int, boxes_per_image: int = 2):
     return {"img": img, "batch_idx": batch_idx, "cls": cls, "bboxes": bboxes}
 
 
+@pytest.mark.parametrize("resize_student", [True, False], ids=["resize-on", "resize-off"])
 @pytest.mark.parametrize("variant", ["d2", "d3"])
 @pytest.mark.parametrize("cfg", ["yolo26n-leaf.yaml", "yolov8m.yaml"])
-def test_overfit_smoke(cfg, variant):
+def test_overfit_smoke(cfg, variant, resize_student):
     torch.manual_seed(0)
     model = DistillDetectionModel(
         cfg,
@@ -42,14 +43,15 @@ def test_overfit_smoke(cfg, variant):
         variant=variant,
         teacher_variant="dinov3_vits16",
         lambda_distill=1.0,
+        resize_student=resize_student,
     )
     model.args = DEFAULT_CFG
     model.train()
 
     opt = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     losses = []
+    batch = _fake_batch(2, IMGSZ, NC)  # reused every step: this is an overfit test, not a generalization one
     for _ in range(5):
-        batch = _fake_batch(2, IMGSZ, NC)
         loss, loss_items = model.loss(batch)
         assert torch.isfinite(loss).all()
         assert "distill_loss" in loss_items

@@ -21,8 +21,31 @@ finetune) is kept so a future custom dataset with novel classes can be added on 
 
 | | |
 |---|---|
-| **d2** | Cls-branch embeddings only. Widens `cv3`'s last conv by `embed_dim`; the extra channels regress the teacher's patch tokens per level, after a learned student-side resampler maps each level onto the teacher's patch grid (3x3 stride-2 convs for finer levels, `DySample` for coarser ones). The teacher target is never passed through anything learned. |
-| **d3** | d2, plus box-branch embeddings (`cv2` widened and resampled the same way, with their own resamplers) and a self-attention-map term computed on the resampled embeddings (`SelfAttentionMap`), matching the teacher's own (RoPE-aware) last-block attention. |
+| **d2** | Cls-branch embeddings only. Widens `cv3`'s last conv by `embed_dim`; the extra channels regress the teacher's patch tokens per level. |
+| **d3** | d2, plus box-branch embeddings (`cv2` widened the same way, with its own resample path) and a self-attention-map term (`SelfAttentionMap`) matching the teacher's own (RoPE-aware) last-block attention. |
+
+### Resize target: student or teacher (`resize_student`)
+
+Student and teacher patch grids rarely match resolution (e.g. a student level at stride 8 vs.
+a stride-16 teacher patch size), so one side has to be resized before the embedding/attention
+losses can compare them. `resize_student` (constructor kwarg on `DistillDetectionModel`,
+`--resize-student`/`--no-resize-student` on `train_pretrain.py`) picks which side:
+
+- **`resize_student=False` (default).** Student embeddings stay at each level's own native FPN
+  stride; the teacher target is resized down/up to match, per level, entirely inside
+  `losses.py` (`embedding_distill_loss` derives its target size from the student tensor's own
+  shape, `attention_distill_loss`/`resize_attention_map` do the same for the attention affinity
+  matrix). Nothing learned sits between the student features and the loss.
+- **`resize_student=True`.** Each level gets its own learned resampler (`_make_resampler` in
+  `heads.py`) mapping it onto the teacher's patch grid before the loss ever sees it: a chain of
+  `Conv2d(dim, dim, kernel_size=3, stride=2)` for finer levels, a `DySample` (learned
+  point-sampling upsampler) for coarser ones. The teacher target is never passed through
+  anything learned in this mode either — only the student side gains parameters.
+
+Either way the teacher side may still get resized (by `losses.py`, unconditionally, to match
+whatever shape the student embed already has) — `resize_student` only controls whether the
+*student* side also carries a learned resampler. For stage-2 finetuning, `resize_student` is
+read back off the stage-1 checkpoint (see below), never re-specified.
 
 Distillation only ever trains through the **one2many** branch (see `leaf_dinov3/heads.py`
 docstrings / the design notes below for why) — `yolov8m` has no one2one branch and is
@@ -176,15 +199,19 @@ conda run -n mu python scripts/train_pretrain.py \
 
 Key flags: `--variant {d2,d3}`, `--teacher-variant`, `--teacher-weights` (local `.pth`,
 defaults to the matching file in `dinov3/weights/`), `--teacher-input-size` (defaults to
-`imgsz`, so the teacher grid tracks the student's), `--attn-num-heads` (d3 only — the box-branch
-attention runs on each level's embeddings after they are resampled onto the teacher grid, so it
-matches the teacher's patch-only attention shape; the teacher map is only resized when
-`--teacher-input-size` makes its grid differ from `imgsz / 16`), `--lambda-distill`, `--fraction`
+`imgsz`, so the teacher grid tracks the student's), `--resize-student`/`--no-resize-student`
+(default off — student embeddings stay at native stride and the teacher target is resized to
+match in `losses.py`; pass `--resize-student` to instead learn a per-level resampler that maps
+the student side onto the teacher's patch grid, see "Resize target" above), `--attn-num-heads`
+(d3 only — the box-branch attention runs on each level's own embeddings, whichever grid they end
+up on depending on `--resize-student`, matching the teacher's patch-only attention shape resized
+to fit), `--lambda-distill`, `--fraction`
 (dataset subset; `>1` = image count, or `[train, val]` list), `--offline` (sets `YOLO_OFFLINE=1`, must precede any network dependent import),
 and `--smoke` — a fast, low-VRAM profile (`yolo26n-leaf.yaml`, `dinov3_vits16`, imgsz 320,
 batch 2, epochs 1, `fraction=[8, 8]`) for quick local/CI-style sanity checks on any machine,
-including CPU-only, vs. the full-scale defaults (`yolo26s-leaf.yaml`, `dinov3_vitb16`, imgsz
-640, batch 64, epochs 300) meant for a large-memory training GPU.
+including CPU-only, vs. the full-scale defaults (`yolo26s-leaf.yaml`, `dinov3_vitb16`). All
+ultralytics train flags (`--epochs`, `--batch`, `--lr0`, `--optimizer`, ...) default to
+ultralytics' own `default.yaml` values unless passed.
 
 **Stage 2 — finetune** (expand to a dataset with novel classes appended at the tail):
 
@@ -196,7 +223,7 @@ conda run -n mu python scripts/train_finetune.py \
 ```
 
 No teacher/variant flags: `DistillFineTuneTrainer` reads `variant`, `teacher_variant`,
-`teacher_input_size`, and `attn_num_heads` straight off the unpickled stage-1
+`teacher_input_size`, `attn_num_heads`, and `resize_student` straight off the unpickled stage-1
 checkpoint, so the rebuilt scaffold can never end up architecturally mismatched with the
 checkpoint it's about to load. `--data`'s first N class names must match `--pretrain-data`
 exactly, in order (`check_class_order`, run before training starts) — novel classes go
@@ -231,11 +258,12 @@ checkpoints (auto-strips if a `teacher` is present).
 conda run -n mu python -m pytest tests/ -v
 ```
 
-34 tests: teacher shape/freeze/RoPE-attention-correctness checks, head forward-shape /
+45 tests: teacher shape/freeze/RoPE-attention-correctness checks, head forward-shape /
 `bias_init` / `strip_distillation` / `expand_num_classes` unit tests (3-level and 4-level,
-`end2end` on and off, d2 and d3), loss-function unit tests (zero-loss, gradient-flow,
-attention-resize row-sum preservation), dataset-YAML path resolution / class-order checks, and
-a synthetic overfit smoke test across all four `{yolo26n-leaf, yolov8m} x {d2, d3}` combinations.
+`end2end` on and off, d2 and d3, and both `resize_student` settings), loss-function unit tests
+(zero-loss, gradient-flow, attention-resize row-sum preservation), dataset-YAML path resolution /
+class-order checks, and a synthetic overfit smoke test across all eight
+`{yolo26n-leaf, yolov8m} x {d2, d3} x {resize_student on, off}` combinations.
 
 ## Known gotchas (found the hard way — see git history / commit messages)
 

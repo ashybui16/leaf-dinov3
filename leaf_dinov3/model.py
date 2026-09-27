@@ -34,6 +34,7 @@ class DistillDetectionModel(DetectionModel):
         teacher_pretrained: bool = True,
         lambda_distill: float = 1.0,
         attn_num_heads: int = 8,
+        resize_student: bool = False,
     ):
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
         if variant not in _HEAD_CLASSES:
@@ -62,6 +63,7 @@ class DistillDetectionModel(DetectionModel):
             distill_dim=self.teacher.embed_dim,
             strides=tuple(int(s) for s in old.stride),
             target_stride=self.teacher.patch_size,
+            resize_student=resize_student,
             **extra,
         )
         new.stride = old.stride

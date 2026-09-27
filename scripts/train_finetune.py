@@ -19,14 +19,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data", required=True, help="finetune dataset yaml; novel classes appended at the tail")
     p.add_argument("--pretrain-data", required=True, help="stage-1 dataset yaml, for class-order validation")
     p.add_argument("--lambda-distill", type=float, default=1.0)
-    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch", type=int, default=None)
     p.add_argument("--imgsz", type=int, default=None)
     p.add_argument("--fraction", type=float, default=None, help="dataset fraction/count; >1 = image count")
-    p.add_argument("--lr0", type=float, default=1e-3)
-    p.add_argument("--optimizer", default="SGD")
-    p.add_argument("--cos-lr", action="store_true")
-    p.add_argument("--device", default="0")
+    p.add_argument("--lr0", type=float, default=None)
+    p.add_argument("--optimizer", default=None)
+    p.add_argument("--cos-lr", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--device", default=None)
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--offline", action="store_true")
 
@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--box", type=float, default=None, help="box loss gain")
     p.add_argument("--cls", type=float, default=None, help="cls loss gain")
     p.add_argument("--dfl", type=float, default=None, help="dfl loss gain")
+    p.add_argument("--iou-loss", default=None, choices=["ciou", "wiou3", "inner_shape"], help="bbox IoU loss")
     p.add_argument("--nbs", type=int, default=None, help="nominal batch size")
 
     # yolo train run control
@@ -87,24 +88,21 @@ def main() -> None:
     args = parse_args()
     check_class_order(args.pretrain_data, args.data)
 
-    batch = args.batch or (2 if args.smoke else 64)
-    imgsz = args.imgsz or (320 if args.smoke else 640)
-    fraction = args.fraction if args.fraction is not None else ([8, 8] if args.smoke else 1.0)
-
     overrides = {
         "model": args.weights,
         "data": resolve_dataset_yaml(args.data),
+        **({"imgsz": 320, "batch": 2, "fraction": [8, 8]} if args.smoke else {}),
+    }
+    cache = {"true": True, "false": False}.get(args.cache, args.cache)
+    extra = {
         "epochs": args.epochs,
-        "batch": batch,
-        "imgsz": imgsz,
+        "batch": args.batch,
+        "imgsz": args.imgsz,
+        "fraction": args.fraction,
         "lr0": args.lr0,
         "optimizer": args.optimizer,
         "cos_lr": args.cos_lr,
         "device": args.device,
-        "fraction": fraction,
-    }
-    cache = {"true": True, "false": False}.get(args.cache, args.cache)
-    extra = {
         "weight_decay": args.weight_decay,
         "momentum": args.momentum,
         "warmup_epochs": args.warmup_epochs,
@@ -113,6 +111,7 @@ def main() -> None:
         "box": args.box,
         "cls": args.cls,
         "dfl": args.dfl,
+        "iou_loss": args.iou_loss,
         "nbs": args.nbs,
         "patience": args.patience,
         "workers": args.workers,

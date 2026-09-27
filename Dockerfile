@@ -9,9 +9,11 @@
 #   docker run --gpus all -v $(pwd)/COCO:/workspace/COCO -it leaf-dinov3
 FROM pytorch/pytorch:2.4.1-cuda11.8-cudnn9-runtime
 
+# HOME=/tmp: writable HOME for any `--user` UID (torch hub / ultralytics / matplotlib caches go under $HOME)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    HOME=/tmp
 
 # libgl1/libglib2.0-0: required by opencv-python (pulled in via my-ultralytics' dependencies)
 # git/vim: dev-container conveniences
@@ -36,8 +38,8 @@ COPY dinov3/ dinov3/
 
 # This repo's own code
 COPY leaf_dinov3/ leaf_dinov3/
-COPY cfg/ cfg/
 COPY scripts/ scripts/
 COPY tests/ tests/
+COPY weights/ weights/
 
 CMD ["bash"]

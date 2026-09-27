@@ -22,15 +22,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--teacher-weights", default=None)
     p.add_argument("--teacher-input-size", type=int, default=None)
     p.add_argument("--attn-num-heads", type=int, default=8)
+    p.add_argument("--resize-student", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--lambda-distill", type=float, default=1.0)
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch", type=int, default=None)
     p.add_argument("--imgsz", type=int, default=None)
     p.add_argument("--fraction", type=float, default=None, help="dataset fraction/count; >1 = image count")
-    p.add_argument("--lr0", type=float, default=1e-2)
-    p.add_argument("--optimizer", default="SGD")
-    p.add_argument("--cos-lr", action="store_true")
-    p.add_argument("--device", default="0")
+    p.add_argument("--lr0", type=float, default=None)
+    p.add_argument("--optimizer", default=None)
+    p.add_argument("--cos-lr", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--device", default=None)
     p.add_argument("--smoke", action="store_true", help="local 4GB-GPU profile: tiny model/teacher/batch/epochs")
     p.add_argument("--offline", action="store_true")
 
@@ -43,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--box", type=float, default=None, help="box loss gain")
     p.add_argument("--cls", type=float, default=None, help="cls loss gain")
     p.add_argument("--dfl", type=float, default=None, help="dfl loss gain")
+    p.add_argument("--iou-loss", default=None, choices=["ciou", "wiou3", "inner_shape"], help="bbox IoU loss")
     p.add_argument("--nbs", type=int, default=None, help="nominal batch size")
 
     # yolo train run control
@@ -90,30 +92,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.smoke:
-        model, teacher_variant, imgsz, batch, epochs, fraction = "yolo26n-leaf.yaml", "dinov3_vits16", 320, 2, 1, [8, 8]
+        model, teacher_variant = "yolo26n-leaf.yaml", "dinov3_vits16"
+        smoke = {"imgsz": 320, "batch": 2, "epochs": 1, "fraction": [8, 8]}
     else:
-        model, teacher_variant, imgsz, batch, epochs, fraction = "yolo26s-leaf.yaml", "dinov3_vitb16", 640, 64, 300, 1.0
-    model = args.model or model
-    teacher_variant = args.teacher_variant or teacher_variant
-    imgsz = args.imgsz or imgsz
-    batch = args.batch or batch
-    epochs = args.epochs or epochs
-    fraction = args.fraction if args.fraction is not None else fraction
+        model, teacher_variant = "yolo26s-leaf.yaml", "dinov3_vitb16"
+        smoke = {}
 
     overrides = {
-        "model": model,
+        "model": args.model or model,
         "data": resolve_dataset_yaml(args.data),
-        "epochs": epochs,
-        "batch": batch,
-        "imgsz": imgsz,
+        **smoke,
+    }
+    cache = {"true": True, "false": False}.get(args.cache, args.cache)
+    extra = {
+        "epochs": args.epochs,
+        "batch": args.batch,
+        "imgsz": args.imgsz,
+        "fraction": args.fraction,
         "lr0": args.lr0,
         "optimizer": args.optimizer,
         "cos_lr": args.cos_lr,
         "device": args.device,
-        "fraction": fraction,
-    }
-    cache = {"true": True, "false": False}.get(args.cache, args.cache)
-    extra = {
         "weight_decay": args.weight_decay,
         "momentum": args.momentum,
         "warmup_epochs": args.warmup_epochs,
@@ -122,6 +121,7 @@ def main() -> None:
         "box": args.box,
         "cls": args.cls,
         "dfl": args.dfl,
+        "iou_loss": args.iou_loss,
         "nbs": args.nbs,
         "patience": args.patience,
         "workers": args.workers,
@@ -164,11 +164,12 @@ def main() -> None:
     trainer = DistillTrainer(
         overrides=overrides,
         variant=args.variant,
-        teacher_variant=teacher_variant,
+        teacher_variant=args.teacher_variant or teacher_variant,
         teacher_weights=args.teacher_weights,
         teacher_input_size=args.teacher_input_size,
         lambda_distill=args.lambda_distill,
         attn_num_heads=args.attn_num_heads,
+        resize_student=args.resize_student,
     )
     trainer.train()
 

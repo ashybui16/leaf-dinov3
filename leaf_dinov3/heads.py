@@ -52,11 +52,15 @@ class DySample(nn.Module):
         return out.view(b, -1, s * h, s * w)
 
 
-def _make_resampler(dim: int, stride: int, target_stride: int) -> nn.Module:
+def _make_resampler(dim: int, stride: int, target_stride: int, resize_student: bool = False) -> nn.Module:
     """Map a stride-`stride` embedding onto the teacher's stride-`target_stride` grid.
 
-    Finer levels get a chain of linear 3x3 stride-2 convs, coarser levels a `DySample`.
+    Finer levels get a chain of linear 3x3 stride-2 convs, coarser levels a `DySample`. If
+    `resize_student` is False, the embedding stays at its native stride (identity); the loss
+    functions resize the teacher side to match instead.
     """
+    if not resize_student:
+        return nn.Identity()
     if stride <= target_stride:
         n = int(math.log2(target_stride // stride))
         assert stride * 2**n == target_stride, f"stride {stride} vs teacher {target_stride}: not a power of 2"
@@ -87,12 +91,15 @@ class DistillDetectD2(Detect):
         *,
         strides: tuple,
         target_stride: int = 16,
+        resize_student: bool = False,
     ):
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
         self.distill_dim = distill_dim
         for seq in self.cv3:
             _extend_last_conv(seq, distill_dim)
-        self.cls_resample = nn.ModuleList(_make_resampler(distill_dim, s, target_stride) for s in strides)
+        self.cls_resample = nn.ModuleList(
+            _make_resampler(distill_dim, s, target_stride, resize_student) for s in strides
+        )
 
     def forward_head(
         self, x: list[torch.Tensor], box_head: nn.Module = None, cls_head: nn.Module = None
@@ -179,9 +186,12 @@ class SelfAttentionMap(nn.Module):
 class DistillDetectD3(DistillDetectD2):
     """D2 plus a box-branch embedding target and a per-level self-attention-map target.
 
-    The box-tail embeddings get their own learned resamplers (`box_resample`) onto the teacher
-    grid, and each level's attention runs on those resampled embeddings, so every level's
-    attention map has the teacher's own shape.
+    If `resize_student` is True, the box-tail embeddings get their own learned resamplers
+    (`box_resample`) onto the teacher grid, and each level's attention runs on those resampled
+    embeddings, so every level's attention map has the teacher's own shape. If False,
+    `box_resample` is identity and attention runs at each level's native resolution, except
+    P2/4: at 640 it is 160x160 = 25600 tokens, whose raw attention matrix would be ~2.6GB/image,
+    so it is bilinearly resized to P3's size first.
     """
 
     def __init__(
@@ -195,6 +205,7 @@ class DistillDetectD3(DistillDetectD2):
         *,
         strides: tuple,
         target_stride: int = 16,
+        resize_student: bool = False,
     ):
         super().__init__(
             nc=nc,
@@ -204,10 +215,14 @@ class DistillDetectD3(DistillDetectD2):
             distill_dim=distill_dim,
             strides=strides,
             target_stride=target_stride,
+            resize_student=resize_student,
         )
         for seq in self.cv2:
             _extend_last_conv(seq, distill_dim)
-        self.box_resample = nn.ModuleList(_make_resampler(distill_dim, s, target_stride) for s in strides)
+        self.resize_student = resize_student
+        self.box_resample = nn.ModuleList(
+            _make_resampler(distill_dim, s, target_stride, resize_student) for s in strides
+        )
         self.self_attn = nn.ModuleList(SelfAttentionMap(distill_dim, attn_num_heads) for _ in range(self.nl))
 
     def forward_head(
@@ -228,7 +243,10 @@ class DistillDetectD3(DistillDetectD2):
         if box_head is self.cv2 and self.distill_dim:  # one2many only; o2o convs stay narrow
             box_embeds = [self.box_resample[i](b[:, n_box:]) for i, b in enumerate(box_raw)]  # teacher grid
             out["dino_box_embed"] = box_embeds
-            tokens = [e.flatten(2).transpose(1, 2) for e in box_embeds]  # (bs, H_t*W_t, distill_dim)
+            attn_in = list(box_embeds)
+            if not self.resize_student and self.stride[0] == 4:  # P2 present, native res: 160x160 tokens is ~2.6GB/image
+                attn_in[0] = F.interpolate(attn_in[0], size=attn_in[1].shape[-2:], mode="bilinear", align_corners=False)
+            tokens = [e.flatten(2).transpose(1, 2) for e in attn_in]  # (bs, H_i*W_i, distill_dim)
             out["dino_attn"] = [self.self_attn[i](t) for i, t in enumerate(tokens)]
         return out
 
