@@ -4,7 +4,7 @@
 # README.md recommends -- no separate torch install needed.
 #
 # Only code and DINOv3's pretrained weights (dinov3/weights/*.pth) are baked into the image;
-# datasets (COCO/, VisDrone/, hotspot-ship/, finetune_kshot/) and my-ultralytics/weights/
+# datasets (COCO/, VisDrone/, hotspot-ship/, *_kshot/) and my-ultralytics/weights/
 # (YOLO weights, not DINO's) are excluded -- see .dockerignore. Mount datasets at run time, e.g.:
 #   docker run --gpus all -v $(pwd)/COCO:/workspace/COCO -it leaf-dinov3
 FROM pytorch/pytorch:2.4.1-cuda11.8-cudnn9-runtime
@@ -32,7 +32,7 @@ RUN pip install -r requirements.txt
 COPY my-ultralytics/ my-ultralytics/
 RUN pip install -e my-ultralytics
 
-# DINOv3 code + pretrained backbone weights (imported via sys.path, not pip-installed; see
+# DINOv3 code (imported via sys.path, not pip-installed; see
 # leaf_dinov3/teacher.py)
 COPY dinov3/ dinov3/
 

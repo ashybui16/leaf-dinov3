@@ -1,7 +1,7 @@
 """Build class-balanced k-shot fine-tune datasets from a base + novel dataset pair.
 
 Each input dataset is described by a standard repo dataset YAML (`path`, `train`, `val`,
-`names` -- the same shape as `cfg/coco.yaml`/`cfg/visdrone.yaml`). The base dataset's classes
+`names` -- the same shape as `COCO/coco.yaml`/`VisDrone/visdrone.yaml`). The base dataset's classes
 keep their ids; the novel dataset's classes are appended at the tail (offset by the base
 dataset's class count), matching the pretrain -> finetune class-order contract checked by
 `leaf_dinov3.data.check_class_order`.

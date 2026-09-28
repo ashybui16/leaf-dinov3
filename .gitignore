@@ -1,7 +1,7 @@
 COCO/
 VisDrone/
 hotspot-ship/
-finetune_kshot/
+*_kshot/
 dinov3/
 my-ultralytics/
 runs/
@@ -9,6 +9,5 @@ runs/
 *.pth
 *.cache
 __pycache__/
-cfg/.resolved_*.yaml
 *.tar
 *.zip

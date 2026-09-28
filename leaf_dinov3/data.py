@@ -16,8 +16,8 @@ def resolve_dataset_yaml(yaml_path: str | Path) -> str:
 
     Two problems, one fix: `~/.config/Ultralytics/settings.json` can set `datasets_dir` to an
     unrelated project, so ultralytics would resolve any *relative* `path:` there instead of
-    here; and a hardcoded *absolute* `path:` checked into `cfg/*.yaml` would only work on the
-    machine it was written on. A relative `path:` in the checked-in YAML, resolved here
+    here; and a hardcoded *absolute* `path:` in a dataset YAML would only work on the
+    machine it was written on. A relative `path:` in the YAML, resolved here
     against this repo's own location rather than ultralytics' global settings, is portable
     across clones and immune to `datasets_dir`.
     """

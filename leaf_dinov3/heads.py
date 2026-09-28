@@ -44,7 +44,7 @@ class DySample(nn.Module):
         coords = torch.stack(torch.meshgrid([xs, ys], indexing="ij")).transpose(1, 2).unsqueeze(1).unsqueeze(0)
         normalizer = torch.tensor([w, h], dtype=x.dtype, device=x.device).view(1, 2, 1, 1, 1)
         coords = 2 * (coords + offset) / normalizer - 1
-        coords = F.pixel_shuffle(coords.view(b, -1, h, w), s).view(b, 2, -1, s * h, s * w)
+        coords = F.pixel_shuffle(coords.reshape(b, -1, h, w), s).reshape(b, 2, -1, s * h, s * w)
         coords = coords.permute(0, 2, 3, 4, 1).contiguous().flatten(0, 1)
         out = F.grid_sample(
             x.reshape(b * self.groups, -1, h, w), coords, mode="bilinear", align_corners=False, padding_mode="border"

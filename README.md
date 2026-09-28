@@ -71,8 +71,9 @@ leaf_dinov3/
   model.py     DistillDetectionModel — hot-swaps the head, adds the distill loss term
   trainer.py   DistillTrainer, DistillFineTuneTrainer
   data.py      resolve_dataset_yaml, check_class_order (pretrain/finetune class-order contract)
-cfg/
-  visdrone.yaml, coco.yaml   repo-relative dataset YAMLs (see "Dataset setup" below)
+VisDrone/visdrone.yaml, COCO/coco.yaml, hotspot-ship/hotspot_ship.yaml
+  repo-relative dataset YAMLs, each next to its data -- gitignored, not in a fresh clone
+  (see "Dataset setup" below)
 scripts/
   train_pretrain.py   train_finetune.py   strip_checkpoint.py   evaluate.py
 tests/
@@ -151,19 +152,20 @@ command below does — pick whichever fits your workflow.)
 
 ### Dataset setup
 
-`cfg/visdrone.yaml` and `cfg/coco.yaml` use a **repo-root-relative** `path:` (e.g. `path:
+`VisDrone/visdrone.yaml` and `COCO/coco.yaml` use a **repo-root-relative** `path:` (e.g. `path:
 VisDrone`), resolved to an absolute path by `leaf_dinov3.data.resolve_dataset_yaml` (called by
 every script in `scripts/`) before ultralytics ever sees it. This sidesteps two portability
 problems at once: a *relative* `path:` handed straight to ultralytics resolves against
 `~/.config/Ultralytics/settings.json`'s `datasets_dir`, which may point at an unrelated project
-on your machine; and a hardcoded *absolute* `path:` checked into the YAML would only work on
+on your machine; and a hardcoded *absolute* `path:` in the YAML would only work on
 the machine it was written on, breaking for every other clone of this repo.
 
-By default this expects your data at:
+The dataset folders, YAMLs included, are gitignored, so a fresh clone has none of them:
+provide your own YAMLs in this shape. By default this expects your data at:
 - `<repo_root>/VisDrone/{train,val,test}/images` + matching `labels/` (YOLO-txt format)
 - `<repo_root>/COCO/images/{train2017,val2017}` + matching `labels/` (YOLO-txt format)
 
-If your data lives elsewhere, edit `path:` in `cfg/visdrone.yaml` / `cfg/coco.yaml` to another
+If your data lives elsewhere, edit `path:` in `VisDrone/visdrone.yaml` / `COCO/coco.yaml` to another
 repo-relative path, or to an absolute path (left untouched by the resolver either way). For a
 dataset that isn't COCO or VisDrone, write your own dataset YAML following the same shape
 (`path`, `train`, `val`, `names`) — see the [Ultralytics dataset YAML
@@ -174,16 +176,16 @@ cache validity is keyed on label path + total size, not content or mtime.
 
 For stage-2 fine-tuning with novel classes, put a YOLO-txt `train`/`val` split at
 `<repo_root>/hotspot-ship/images/{train,val}` + matching `labels/`, then run
-`conda run -n mu python scripts/build_finetune_kshot.py` to generate `finetune_kshot/`
+`conda run -n mu python scripts/build_finetune_kshot.py --base-yaml COCO/coco.yaml
+--novel-yaml hotspot-ship/hotspot_ship.yaml` to generate `coco_hotspot_ship_kshot/`
 (gitignored, copied from `COCO/` + `hotspot-ship/` — self-contained, not symlinked, so it's
-portable to e.g. a Docker volume mount) and the checked-in `cfg/finetune_k{1,3,5,10,30}.yaml`
-files it's built for. These give class-balanced k-shot training sets (COCO's 80 base classes
-+ `hot-spot`/`ship` all sampled to ~k boxes each) with a fixed, unsampled val set (full COCO
-val2017 + full hotspot-ship val) — re-run the script after any change to `hotspot-ship/` or
+portable to e.g. a Docker volume mount) with its `finetune_k{1,3,5,10,30}.yaml` files inside.
+These give class-balanced k-shot training sets (COCO's 80 base classes + `hot-spot`/`ship` all
+sampled to ~k boxes each) with a fixed, unsampled val set (full COCO val2017 + full hotspot-ship val) — re-run the script after any change to `hotspot-ship/` or
 `COCO/` to regenerate.
 
 `build_finetune_kshot.py` isn't hardcoded to COCO + hotspot-ship: `--base-yaml`/`--novel-yaml`
-(defaults `cfg/coco.yaml` / `cfg/hotspot_ship.yaml`) each take any dataset yaml of this repo's
+(both required) each take any dataset yaml of this repo's
 standard shape (`path`, `train`, `val`, `names`) — the novel dataset's classes are appended
 after the base dataset's, matching `check_class_order`'s tail-append contract.
 
@@ -193,7 +195,7 @@ after the base dataset's, matching `check_class_order`'s tail-append contract.
 
 ```bash
 conda run -n mu python scripts/train_pretrain.py \
-  --data cfg/visdrone.yaml --model yolo26s-leaf.yaml --variant d2 \
+  --data COCO/coco.yaml --model yolo26s-leaf.yaml --variant d2 \
   --teacher-variant dinov3_vitb16 --imgsz 640 --batch 64 --epochs 300
 ```
 
@@ -218,7 +220,7 @@ ultralytics' own `default.yaml` values unless passed.
 ```bash
 conda run -n mu python scripts/train_finetune.py \
   --weights runs/detect/train/weights/best.pt \
-  --data cfg/my_novel_classes.yaml --pretrain-data cfg/visdrone.yaml \
+  --data coco_hotspot_ship_kshot/finetune_k10.yaml --pretrain-data COCO/coco.yaml \
   --lr0 1e-3 --epochs 100
 ```
 
@@ -244,7 +246,7 @@ from the same YAML exactly.
 **Evaluate:**
 
 ```bash
-conda run -n mu python scripts/evaluate.py --weights best.pt --data cfg/visdrone.yaml \
+conda run -n mu python scripts/evaluate.py --weights best.pt --data VisDrone/visdrone.yaml \
   --split val --base-classes 10   # optional: report base vs. novel mAP separately
 ```
 

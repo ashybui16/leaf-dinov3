@@ -2,7 +2,7 @@
 /COCO/
 /VisDrone/
 /hotspot-ship/
-/finetune_kshot/
+/*_kshot/
 /runs/
 
 # VCS metadata for the vendored dinov3 / my-ultralytics clones
@@ -11,5 +11,3 @@
 # Byte-code / test caches
 **/__pycache__
 /.pytest_cache/
-
-/cfg/.resolved_*.yaml
