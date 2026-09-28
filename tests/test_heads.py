@@ -208,6 +208,22 @@ def test_d3_bias_init_does_not_clobber_box_distill_tail():
         assert seq[-1].bias.data[:10].allclose(seq[-1].bias.data[0].expand(10))
 
 
+def test_d3_eval_skips_distill_outputs():
+    """Distill outputs only feed the train-time loss, so eval (validation) must not compute them."""
+    ch = (64, 128, 256)
+    strides = [8, 16, 32]
+    head = DistillDetectD3(
+        nc=10, ch=ch, distill_dim=DISTILL_DIM, attn_num_heads=ATTN_HEADS, strides=strides, resize_student=True
+    )
+    head.stride = torch.tensor(strides)
+    head.eval()
+    with torch.no_grad():
+        preds = head.forward_head(_feats(2, ch), **head.one2many)
+    assert "dino_embed" not in preds
+    assert "dino_box_embed" not in preds
+    assert "dino_attn" not in preds
+
+
 def test_d3_strip_distillation_restores_stock_shapes():
     ch = (64, 128, 256)
     nc, reg_max = 10, 16

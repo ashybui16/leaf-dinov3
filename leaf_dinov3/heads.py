@@ -112,7 +112,7 @@ class DistillDetectD2(Detect):
         cls_raw = [cls_head[i](x[i]) for i in range(self.nl)]
         scores = torch.cat([c[:, : self.nc].reshape(bs, self.nc, -1) for c in cls_raw], dim=-1)
         out = {"boxes": boxes, "scores": scores, "feats": x}
-        if cls_head is self.cv3 and self.distill_dim:  # one2many only; o2o convs stay narrow
+        if self.training and cls_head is self.cv3 and self.distill_dim:  # train-time one2many only; o2o convs stay narrow
             out["dino_embed"] = [self.cls_resample[i](c[:, self.nc :]) for i, c in enumerate(cls_raw)]  # teacher grid
         return out
 
@@ -238,9 +238,9 @@ class DistillDetectD3(DistillDetectD2):
         cls_raw = [cls_head[i](x[i]) for i in range(self.nl)]
         scores = torch.cat([c[:, : self.nc].reshape(bs, self.nc, -1) for c in cls_raw], dim=-1)
         out = {"boxes": boxes, "scores": scores, "feats": x}
-        if cls_head is self.cv3 and self.distill_dim:  # one2many only; o2o convs stay narrow
+        if self.training and cls_head is self.cv3 and self.distill_dim:  # train-time one2many only; o2o convs stay narrow
             out["dino_embed"] = [self.cls_resample[i](c[:, self.nc :]) for i, c in enumerate(cls_raw)]  # teacher grid
-        if box_head is self.cv2 and self.distill_dim:  # one2many only; o2o convs stay narrow
+        if self.training and box_head is self.cv2 and self.distill_dim:  # train-time one2many only; o2o convs stay narrow
             box_embeds = [self.box_resample[i](b[:, n_box:]) for i, b in enumerate(box_raw)]  # teacher grid
             out["dino_box_embed"] = box_embeds
             attn_in = list(box_embeds)

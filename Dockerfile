@@ -32,14 +32,4 @@ RUN pip install -r requirements.txt
 COPY my-ultralytics/ my-ultralytics/
 RUN pip install -e my-ultralytics
 
-# DINOv3 code (imported via sys.path, not pip-installed; see
-# leaf_dinov3/teacher.py)
-COPY dinov3/ dinov3/
-
-# This repo's own code
-COPY leaf_dinov3/ leaf_dinov3/
-COPY scripts/ scripts/
-COPY tests/ tests/
-COPY weights/ weights/
-
 CMD ["bash"]
