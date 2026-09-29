@@ -6,25 +6,20 @@ Distillation settings are explicit constructor kwargs, never `overrides` keys: `
 
 from __future__ import annotations
 
-from torch import nn
 from ultralytics.models.yolo.detect.train import DetectionTrainer
 from ultralytics.utils import DEFAULT_CFG, RANK
 
 from .model import DistillDetectionModel
 
 
-def _infer_resize_student(head, teacher_patch_size: int) -> bool:
-    """Read `resize_student` back off a loaded head, the same way `attn_num_heads` is below.
+def _infer_learnable_resize_student(head) -> bool:
+    """Read `learnable_resize_student` back off a loaded head, the same way `attn_num_heads` is below.
 
-    A level's resampler is only informative where its own stride differs from the teacher's
-    patch size -- a matching level gets `Identity` either way. If every level already matches,
-    `resize_student` can't be observed from the checkpoint and also doesn't matter (no resampler
-    params exist either way), so default to `False`, matching the model's own default.
+    Only learned resamplers (convs/`CARAFE`) have params; `Identity`, `nn.AvgPool2d` and
+    `nn.Upsample` have none. If every level already sits at the teacher's stride, the flag can't
+    be observed and also doesn't matter, so `False` (the model's own default) is returned.
     """
-    for resample, stride in zip(head.cls_resample, head.stride):
-        if int(stride) != teacher_patch_size:
-            return not isinstance(resample, nn.Identity)
-    return False
+    return any(True for r in head.cls_resample for _ in r.parameters())
 
 
 class DistillTrainer(DetectionTrainer):
@@ -42,7 +37,7 @@ class DistillTrainer(DetectionTrainer):
         teacher_input_size: int | None = None,
         lambda_distill: float = 1.0,
         attn_num_heads: int = 8,
-        resize_student: bool = False,
+        learnable_resize_student: bool = False,
     ):
         self.variant = variant
         self.teacher_variant = teacher_variant
@@ -50,7 +45,7 @@ class DistillTrainer(DetectionTrainer):
         self.teacher_input_size = teacher_input_size
         self.lambda_distill = lambda_distill
         self.attn_num_heads = attn_num_heads
-        self.resize_student = resize_student
+        self.learnable_resize_student = learnable_resize_student
         super().__init__(cfg=cfg, overrides=overrides, _callbacks=_callbacks)
 
     def _build_model(self, cfg, nc: int | None, verbose: bool) -> DistillDetectionModel:
@@ -65,7 +60,7 @@ class DistillTrainer(DetectionTrainer):
             teacher_input_size=self.teacher_input_size,
             lambda_distill=self.lambda_distill,
             attn_num_heads=self.attn_num_heads,
-            resize_student=self.resize_student,
+            learnable_resize_student=self.learnable_resize_student,
         )
 
     def get_model(self, cfg=None, weights=None, verbose: bool = True) -> DistillDetectionModel:
@@ -81,24 +76,23 @@ class DistillTrainer(DetectionTrainer):
 class DistillFineTuneTrainer(DistillTrainer):
     """Loads a stage-1 checkpoint at its own class count, then expands to the finetune dataset.
 
-    `model=<stage-1 .pt>` is required: `BaseTrainer.setup_model` unpickles the whole
-    `DistillDetectionModel` (teacher included) and hands it to `get_model` as `weights`. No
-    teacher/d3 args are needed: `variant`/`teacher_variant`/`teacher_input_size`/
-    `attn_num_heads`/`resize_student` are all read back off the checkpoint itself, so a
+    `model=<stage-1 .pt>` is required: `BaseTrainer.setup_model` unpickles the
+    `DistillDetectionModel` (student only, see `DistillDetectionModel.__getstate__`) and hands it
+    to `get_model` as `weights`. No teacher/d3 args are needed: `variant`/`teacher_variant`/
+    `teacher_weights`/`teacher_input_size`/
+    `attn_num_heads`/`learnable_resize_student` are all read back off the checkpoint itself, so a
     freshly-built model can never end up architecturally mismatched with the checkpoint it's
     about to load. This matters beyond a state_dict shape check for `attn_num_heads`:
     `SelfAttentionMap`'s q/k `nn.Linear` shapes don't depend on it, so a wrong value would
     silently load fine and then scramble the q/k head-reshape at runtime instead of erroring.
-    `resize_student` has the same failure mode: `cls_resample`/`box_resample` hold `Identity`
-    (no params) on one side or a real resampler (with params) on the other, so a mismatched
+    `learnable_resize_student` has the same failure mode: `cls_resample`/`box_resample` hold a
+    param-free pool/bilinear resize on one side or a real resampler (with params) on the other, so a mismatched
     guess wouldn't error either -- it'd just leave real resampler weights randomly initialized
     instead of loaded.
 
-    The scaffold's teacher is built with `teacher_pretrained=False` (random init, no weight
-    file read): `model.load(weights)` immediately overwrites every teacher parameter with the
-    checkpoint's actual frozen stage-1 weights anyway, so requiring the *default* weight file
-    to exist on disk here would be pointless -- and wrong whenever stage 1 used a custom
-    `--teacher-weights` path, since `DinoV3Teacher` doesn't retain that path to forward.
+    The teacher is rebuilt from the same `.pth` stage 1 used (`teacher_weights`, or the default
+    file in `dinov3/weights/` when that is None), so it must still be loadable at finetune time;
+    a relative `teacher_weights` path resolves against the finetune's working directory.
     """
 
     def get_model(self, cfg=None, weights=None, verbose: bool = True) -> DistillDetectionModel:
@@ -106,19 +100,19 @@ class DistillFineTuneTrainer(DistillTrainer):
             raise ValueError("DistillFineTuneTrainer requires `model=<stage-1 checkpoint>.pt`")
         head = weights.model[-1]
         attn_num_heads = head.self_attn[0].num_heads if getattr(head, "self_attn", None) is not None else self.attn_num_heads
-        resize_student = _infer_resize_student(head, weights.teacher.patch_size)
+        learnable_resize_student = _infer_learnable_resize_student(head)
         model = DistillDetectionModel(
             cfg,
             nc=None,  # keep the checkpoint's own nc
             ch=self.data["channels"],
             verbose=verbose and RANK == -1,
             variant=weights.variant,
-            teacher_variant=weights.teacher.variant,
-            teacher_input_size=weights.teacher.input_size,
-            teacher_pretrained=False,
+            teacher_variant=weights.teacher_variant,
+            teacher_weights=weights.teacher_weights,
+            teacher_input_size=weights.teacher_input_size,
             lambda_distill=self.lambda_distill,
             attn_num_heads=attn_num_heads,
-            resize_student=resize_student,
+            learnable_resize_student=learnable_resize_student,
         )
         model.load(weights)
         model.expand_num_classes(self.data["nc"])

@@ -24,28 +24,45 @@ finetune) is kept so a future custom dataset with novel classes can be added on 
 | **d2** | Cls-branch embeddings only. Widens `cv3`'s last conv by `embed_dim`; the extra channels regress the teacher's patch tokens per level. |
 | **d3** | d2, plus box-branch embeddings (`cv2` widened the same way, with its own resample path) and a self-attention-map term (`SelfAttentionMap`) matching the teacher's own (RoPE-aware) last-block attention. |
 
-### Resize target: student or teacher (`resize_student`)
+### Student resize onto the teacher grid (`learnable_resize_student`)
 
 Student and teacher patch grids rarely match resolution (e.g. a student level at stride 8 vs.
-a stride-16 teacher patch size), so one side has to be resized before the embedding/attention
-losses can compare them. `resize_student` (constructor kwarg on `DistillDetectionModel`,
-`--resize-student`/`--no-resize-student` on `train_pretrain.py`) picks which side:
+a stride-16 teacher patch size), and the student embedding dim is forced to equal the
+teacher's `embed_dim` (no projection). Every student level is resized onto the teacher's patch
+grid by a per-level, student-side resampler (`_make_resampler` in `heads.py`); the teacher
+target is never passed through anything learned. `learnable_resize_student` (constructor
+kwarg on `DistillDetectionModel`, `--learnable-resize-student`/`--no-learnable-resize-student`
+on `train_pretrain.py`) picks the resampler:
 
-- **`resize_student=False` (default).** Student embeddings stay at each level's own native FPN
-  stride; the teacher target is resized down/up to match, per level, entirely inside
-  `losses.py` (`embedding_distill_loss` derives its target size from the student tensor's own
-  shape, `attention_distill_loss`/`resize_attention_map` do the same for the attention affinity
-  matrix). Nothing learned sits between the student features and the loss.
-- **`resize_student=True`.** Each level gets its own learned resampler (`_make_resampler` in
-  `heads.py`) mapping it onto the teacher's patch grid before the loss ever sees it: a chain of
-  `Conv2d(dim, dim, kernel_size=3, stride=2)` for finer levels, a `DySample` (learned
-  point-sampling upsampler) for coarser ones. The teacher target is never passed through
-  anything learned in this mode either — only the student side gains parameters.
+- **`False` (default).** No parameters: finer levels are average-pooled (`nn.AvgPool2d`, each
+  output is the mean of exactly the student cells under one teacher patch), coarser levels
+  bilinearly upsampled (`nn.Upsample`).
+- **`True`.** A chain of `Conv2d(dim, dim, kernel_size=3, stride=2)` for finer levels, a
+  `CARAFE` (content-aware reassembly upsampler) for coarser ones.
 
-Either way the teacher side may still get resized (by `losses.py`, unconditionally, to match
-whatever shape the student embed already has) — `resize_student` only controls whether the
-*student* side also carries a learned resampler. For stage-2 finetuning, `resize_student` is
-read back off the stage-1 checkpoint (see below), never re-specified.
+Levels already at the teacher's stride get `Identity` either way. In d3 the self-attention
+runs on the resampled box embeddings, so every level's attention map has the teacher's shape.
+`losses.py` still resizes the teacher side to the student's shape, which is a no-op unless
+`--teacher-input-size` differs from `imgsz`. For stage-2 finetuning, the flag is read back
+off the stage-1 checkpoint (see below), never re-specified.
+
+### Losses
+
+- **Embeddings:** per-location cosine distance `1 - cos(s, t)` (range 0-2, minimum exactly at
+  the teacher's direction), after subtracting each side's per-channel mean over (batch, H, W).
+  Without that centering, a few massive, near-constant DINOv3 channels let a student that
+  predicts one shared mean token everywhere score ~0.33 with no spatial information; centered,
+  that shortcut scores ~1.0, the same as a random student. A channel softmax + cross-entropy was tried and dropped: feature
+  channels aren't categories, a few massive DINOv3 channels dominate the softmax, and with
+  unequal temperatures its minimum sits ~25 degrees off the teacher.
+- **Attention:** row-wise KL `sum(t * (log t - log s))`, since rows are real softmax
+  distributions. Same gradients as the cross-entropy `-sum(t * log s)`, but it bottoms out at 0
+  instead of at the teacher's row entropy (~6 nats for ViT-B at 640), so the logged curve is
+  readable.
+- **Weighting:** ultralytics' detection loss is `per-sample loss * batch_size`, and the trainer
+  sums the loss vector, so the distill element is multiplied by the batch size too;
+  `lambda_distill=1` means the same weight as one detection term. The logged `distill_loss` is
+  the per-sample value.
 
 Distillation only ever trains through the **one2many** branch (see `leaf_dinov3/heads.py`
 docstrings / the design notes below for why) — `yolov8m` has no one2one branch and is
@@ -67,7 +84,7 @@ unaffected; `yolo26*-leaf` keeps a stock-width, stock-behavior one2one branch au
 leaf_dinov3/
   teacher.py   DinoV3Teacher — frozen backbone, patch tokens (+ RoPE-aware attention for d3)
   heads.py     DistillDetectD2 / DistillDetectD3, SelfAttentionMap, _extend_last_conv
-  losses.py    normalize_channels, embedding_distill_loss, resize_attention_map, attention_distill_loss
+  losses.py    embedding_distill_loss (centered cosine), resize_attention_map, attention_distill_loss (KL)
   model.py     DistillDetectionModel — hot-swaps the head, adds the distill loss term
   trainer.py   DistillTrainer, DistillFineTuneTrainer
   data.py      resolve_dataset_yaml, check_class_order (pretrain/finetune class-order contract)
@@ -201,13 +218,11 @@ conda run -n mu python scripts/train_pretrain.py \
 
 Key flags: `--variant {d2,d3}`, `--teacher-variant`, `--teacher-weights` (local `.pth`,
 defaults to the matching file in `dinov3/weights/`), `--teacher-input-size` (defaults to
-`imgsz`, so the teacher grid tracks the student's), `--resize-student`/`--no-resize-student`
-(default off — student embeddings stay at native stride and the teacher target is resized to
-match in `losses.py`; pass `--resize-student` to instead learn a per-level resampler that maps
-the student side onto the teacher's patch grid, see "Resize target" above), `--attn-num-heads`
-(d3 only — the box-branch attention runs on each level's own embeddings, whichever grid they end
-up on depending on `--resize-student`, matching the teacher's patch-only attention shape resized
-to fit), `--lambda-distill`, `--fraction`
+`imgsz`, so the teacher grid tracks the student's), `--learnable-resize-student`
+(default off — student embeddings are pooled/bilinearly resized onto the teacher's patch grid; pass it
+to use learned 3x3 stride-2 convs / `CARAFE` instead, see "Student resize" above),
+`--attn-num-heads` (d3 only — the box-branch attention runs on each level's resampled
+embeddings, matching the teacher's patch-only attention shape), `--lambda-distill`, `--fraction`
 (dataset subset; `>1` = image count, or `[train, val]` list), `--offline` (sets `YOLO_OFFLINE=1`, must precede any network dependent import),
 and `--smoke` — a fast, low-VRAM profile (`yolo26n-leaf.yaml`, `dinov3_vits16`, imgsz 320,
 batch 2, epochs 1, `fraction=[8, 8]`) for quick local/CI-style sanity checks on any machine,
@@ -225,22 +240,31 @@ conda run -n mu python scripts/train_finetune.py \
 ```
 
 No teacher/variant flags: `DistillFineTuneTrainer` reads `variant`, `teacher_variant`,
-`teacher_input_size`, `attn_num_heads`, and `resize_student` straight off the unpickled stage-1
-checkpoint, so the rebuilt scaffold can never end up architecturally mismatched with the
-checkpoint it's about to load. `--data`'s first N class names must match `--pretrain-data`
+`teacher_weights`, `teacher_input_size`, `attn_num_heads`, and `learnable_resize_student`
+straight off the unpickled stage-1 checkpoint, so the rebuilt scaffold can never end up
+architecturally mismatched with the checkpoint it's about to load. The teacher itself is not in
+the checkpoint (see "Checkpoints" below): it is rebuilt from the same `.pth` stage 1 used, so
+that file must still be loadable (a relative `--teacher-weights` path resolves against the
+finetune's working directory). `--data`'s first N class names must match `--pretrain-data`
 exactly, in order (`check_class_order`, run before training starts) — novel classes go
 strictly at the tail, since `expand_num_classes` preserves existing class weight rows and
 moves the distill tail to the new end position by index.
 
-**Export** (strip the teacher and the distill channels for deployment):
+**Checkpoints hold the student only.** The frozen teacher never changes, so
+`DistillDetectionModel.__getstate__` drops it from every pickle and deepcopy: `last.pt`/`best.pt`
+carry only the student plus the teacher's config (`teacher_variant`, `teacher_weights`,
+`teacher_input_size`), and ultralytics' EMA copy holds no second teacher on the GPU. Pretrain
+(including `resume`) and finetune rebuild the teacher from its `.pth`.
+
+**Export** (strip the distill channels for deployment):
 
 ```bash
 conda run -n mu python scripts/strip_checkpoint.py --weights best.pt --out stripped.pt
 ```
 
 Idempotent — running it again on an already-stripped checkpoint is a no-op, not an error.
-Removes the frozen teacher (~327 MB of ViT-B rides along in every checkpoint otherwise) and
-shrinks the head back to stock shapes; parameter count afterwards matches a stock model built
+Shrinks the head back to stock shapes (and drops a pickled teacher, if the checkpoint predates
+"Checkpoints hold the student only"); parameter count afterwards matches a stock model built
 from the same YAML exactly.
 
 **Evaluate:**
@@ -252,7 +276,7 @@ conda run -n mu python scripts/evaluate.py --weights best.pt --data VisDrone/vis
 
 Wraps ultralytics' native `DetectionValidator` (correct letterboxed decode, per-class AP)
 rather than hand-rolling a pycocotools loop; works on both stripped and unstripped
-checkpoints (auto-strips if a `teacher` is present).
+checkpoints (auto-strips if the head still has distill channels).
 
 ## Testing
 
@@ -260,12 +284,12 @@ checkpoints (auto-strips if a `teacher` is present).
 conda run -n mu python -m pytest tests/ -v
 ```
 
-45 tests: teacher shape/freeze/RoPE-attention-correctness checks, head forward-shape /
+63 tests: teacher shape/freeze/RoPE-attention-correctness checks, head forward-shape /
 `bias_init` / `strip_distillation` / `expand_num_classes` unit tests (3-level and 4-level,
-`end2end` on and off, d2 and d3, and both `resize_student` settings), loss-function unit tests
-(zero-loss, gradient-flow, attention-resize row-sum preservation), dataset-YAML path resolution /
-class-order checks, and a synthetic overfit smoke test across all eight
-`{yolo26n-leaf, yolov8m} x {d2, d3} x {resize_student on, off}` combinations.
+`end2end` on and off, d2 and d3, and both `learnable_resize_student` settings, CARAFE, exact patch-mean default downsampling, resize-mode inference), loss-function unit tests
+(cosine-distance and attention-KL minima, KL direction, mean-token centering, gradient-flow, attention-resize row-sum preservation), dataset-YAML path resolution /
+class-order checks, a checkpoint-excludes-teacher round-trip, a strict teacher-less load (NaN recovery), batch-size weighting of the distill term, and a synthetic overfit smoke test across all eight
+`{yolo26n-leaf, yolov8m} x {d2, d3} x {learnable_resize_student on, off}` combinations.
 
 ## Known gotchas (found the hard way — see git history / commit messages)
 
@@ -277,16 +301,17 @@ class-order checks, and a synthetic overfit smoke test across all eight
   `SelfAttention.compute_attention` in DINOv3; a qkv-forward-hook would silently compute wrong
   attention (passes every shape test, fails a numerical comparison against the unwrapped
   block). The replacement is a module-level callable class, not a closure — closures aren't
-  picklable, and ultralytics periodically pickles the whole model (teacher included) at every
-  checkpoint save, so a closure-based version trained fine for one epoch and then crashed
-  right before saving `last.pt`.
-- **`lambda_distill` needs to be tuned up from 1.0 for a real training signal.**
-  `embedding_distill_loss` L2-normalizes both sides before `smooth_l1_loss`, so its natural
-  scale is roughly `1/embed_dim` regardless of resolution or batch size — tiny next to
-  `box_loss`/`cls_loss` (O(1-5)). This doesn't affect correctness (verified the loss converges
-  cleanly to ~0 given a properly scaled gradient), but a smoke run at the default lambda won't
-  show a visible downward trend the way the other loss terms might. Scale `lambda_distill` up
-  (order-of-magnitude starting point: `~embed_dim`) for it to meaningfully influence training.
+  picklable, and back when the teacher was still pickled into every checkpoint, a closure-based
+  version trained fine for one epoch and then crashed right before saving `last.pt`.
+- **The distill term used to be ~1/batch too weak.** ultralytics multiplies the detection
+  loss by the batch size before the trainer sums the loss vector; the distill element was a
+  plain per-sample mean, so at batch 64 it got 1/64 of the gradient weight its logged value
+  suggested. It is now batch-scaled the same way (see "Losses"). Separately, the old
+  SmoothL1-on-unit-vectors loss was effectively `(1 - cos) / D`, which is why earlier notes
+  recommended `lambda_distill ~ embed_dim`; with the cosine/KL losses, start from 1.
+- **The overfit smoke test checks `min(losses[1:]) < losses[0]`, not the last step.** Raw SGD
+  (lr 0.01, momentum 0.9) on yolov8m spikes on an occasional step for some seeds even with
+  `lambda_distill=0`, so a last-step check is seed-flaky.
 - **`expand_num_classes` must bias-init new class rows**, not leave them at ~0. Left
   uninitialized, a class that never appears in any label predicts ~50% at every anchor instead
   of ~1%, inflating `cls_loss` by ~100x once summed over anchors and divided by the small

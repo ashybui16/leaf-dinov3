@@ -9,7 +9,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from leaf_dinov3.heads import DistillDetectD2, DistillDetectD3, DySample  # noqa: E402
+from leaf_dinov3.heads import CARAFE, DistillDetectD2, DistillDetectD3, _make_resampler  # noqa: E402
+from leaf_dinov3.trainer import _infer_learnable_resize_student  # noqa: E402
 
 DISTILL_DIM = 16
 ATTN_HEADS = 2
@@ -22,11 +23,18 @@ def _feats(bs: int, ch: tuple, base: int = 40):
 
 @pytest.mark.parametrize("ch", [(256, 512, 1024), (64, 128, 256, 512)], ids=["3lvl-yolov8m", "4lvl-leaf"])
 @pytest.mark.parametrize("end2end", [False, True], ids=["e2e-off", "e2e-on"])
-def test_forward_shapes(ch, end2end):
+@pytest.mark.parametrize("learnable", [True, False], ids=["learnable", "fixed"])
+def test_forward_shapes(ch, end2end, learnable):
     nc, reg_max, bs = 10, 16, 2
     strides = [8 * 2**i for i in range(len(ch))]
     head = DistillDetectD2(
-        nc=nc, reg_max=reg_max, end2end=end2end, ch=ch, distill_dim=DISTILL_DIM, strides=strides, resize_student=True
+        nc=nc,
+        reg_max=reg_max,
+        end2end=end2end,
+        ch=ch,
+        distill_dim=DISTILL_DIM,
+        strides=strides,
+        learnable_resize_student=learnable,
     )
     head.stride = torch.tensor(strides)
     head.train()
@@ -48,22 +56,6 @@ def test_forward_shapes(ch, end2end):
         assert "dino_embed" not in o2o
         assert o2o["boxes"].shape == (bs, 4 * reg_max, n_anchors)
         assert o2o["scores"].shape == (bs, nc, n_anchors)
-
-
-@pytest.mark.parametrize("ch", [(256, 512, 1024), (64, 128, 256, 512)], ids=["3lvl-yolov8m", "4lvl-leaf"])
-def test_forward_shapes_no_resize(ch):
-    nc, reg_max, bs = 10, 16, 2
-    strides = [8 * 2**i for i in range(len(ch))]
-    head = DistillDetectD2(
-        nc=nc, reg_max=reg_max, ch=ch, distill_dim=DISTILL_DIM, strides=strides, resize_student=False
-    )
-    head.stride = torch.tensor(strides)
-    head.train()
-    x = _feats(bs, ch)
-    preds = head(x)
-    for i, embed in enumerate(preds["dino_embed"]):
-        native = 40 // 2**i
-        assert embed.shape == (bs, DISTILL_DIM, native, native)
 
 
 def test_bias_init_does_not_clobber_cls_slice():
@@ -148,7 +140,8 @@ def test_expand_num_classes_biases_new_rows_with_rare_object_prior():
 
 @pytest.mark.parametrize("ch", [(256, 512, 1024), (64, 128, 256, 512)], ids=["3lvl-yolov8m", "4lvl-leaf"])
 @pytest.mark.parametrize("end2end", [False, True], ids=["e2e-off", "e2e-on"])
-def test_d3_forward_shapes(ch, end2end):
+@pytest.mark.parametrize("learnable", [True, False], ids=["learnable", "fixed"])
+def test_d3_forward_shapes(ch, end2end, learnable):
     nc, reg_max, bs = 10, 16, 2
     p2 = len(ch) == 4
     strides = [(4 if p2 else 8) * 2**i for i in range(len(ch))]
@@ -160,7 +153,7 @@ def test_d3_forward_shapes(ch, end2end):
         distill_dim=DISTILL_DIM,
         attn_num_heads=ATTN_HEADS,
         strides=strides,
-        resize_student=True,
+        learnable_resize_student=learnable,
     )
     head.stride = torch.tensor(strides)
     head.train()
@@ -213,7 +206,7 @@ def test_d3_eval_skips_distill_outputs():
     ch = (64, 128, 256)
     strides = [8, 16, 32]
     head = DistillDetectD3(
-        nc=10, ch=ch, distill_dim=DISTILL_DIM, attn_num_heads=ATTN_HEADS, strides=strides, resize_student=True
+        nc=10, ch=ch, distill_dim=DISTILL_DIM, attn_num_heads=ATTN_HEADS, strides=strides, learnable_resize_student=True
     )
     head.stride = torch.tensor(strides)
     head.eval()
@@ -274,46 +267,39 @@ def test_d3_expand_num_classes_leaves_box_branch_untouched():
         assert seq[-1].out_channels == new_nc + DISTILL_DIM
 
 
-@pytest.mark.parametrize("ch", [(256, 512, 1024), (64, 128, 256, 512)], ids=["3lvl-yolov8m", "4lvl-leaf"])
-def test_d3_forward_shapes_no_resize(ch):
-    nc, reg_max, bs = 10, 16, 2
-    p2 = len(ch) == 4
-    strides = [(4 if p2 else 8) * 2**i for i in range(len(ch))]
-    head = DistillDetectD3(
-        nc=nc,
-        reg_max=reg_max,
-        ch=ch,
-        distill_dim=DISTILL_DIM,
-        attn_num_heads=ATTN_HEADS,
-        strides=strides,
-        resize_student=False,
-    )
-    head.stride = torch.tensor(strides)
-    head.train()
-    x = _feats(bs, ch)
-    preds = head(x)
-    native_grids = [40 // 2**i for i in range(len(ch))]
-    for embed, g in zip(preds["dino_embed"] + preds["dino_box_embed"], native_grids * 2):
-        assert embed.shape[-2:] == (g, g)
-    # attention grids match native resolution, except P2 (level 0) is bilinearly resized to P3's
-    # (level 1's) grid first, so its attention matrix stays a manageable size
-    attn_grids = [native_grids[1] if p2 else native_grids[0], *native_grids[1:]]
-    for attn, g in zip(preds["dino_attn"], attn_grids):
-        assert attn.shape == (bs, g * g, g * g)
-        row_sums = attn.sum(dim=-1)
-        assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-4)
-    # remaining levels differ: confirms N_i tracks each level's own native grid, not a shared teacher grid
-    n_per_level = [a.shape[-1] for a in preds["dino_attn"]]
-    assert len(set(n_per_level)) == len(ch) - (1 if p2 else 0)
+@pytest.mark.parametrize("stride", [4, 8])
+def test_default_downsample_is_exact_patch_mean(stride):
+    """Default (non-learnable) downsampling averages whole teacher patches, not just their centres."""
+    k = 16 // stride
+    x = torch.rand(1, DISTILL_DIM, 40, 40)
+    out = _make_resampler(DISTILL_DIM, stride, 16)(x)
+    patch_mean = x.reshape(1, DISTILL_DIM, 40 // k, k, 40 // k, k).mean(dim=(3, 5))
+    assert torch.allclose(out, patch_mean, atol=1e-6)
 
 
-def test_dysample_upsamples_and_learns():
-    up = DySample(DISTILL_DIM, scale=2)
+@pytest.mark.parametrize("learnable", [True, False], ids=["learnable", "fixed"])
+@pytest.mark.parametrize("strides", [(8, 16, 32), (4, 8, 16, 32), (16,)], ids=["3lvl", "4lvl", "stride16-only"])
+def test_infer_learnable_resize_student_round_trips(learnable, strides):
+    ch = (64, 128, 256, 512)[: len(strides)]
+    head = DistillDetectD2(nc=10, ch=ch, distill_dim=DISTILL_DIM, strides=strides, learnable_resize_student=learnable)
+    expected = learnable and strides != (16,)  # all-Identity is unobservable, defaults to False
+    assert _infer_learnable_resize_student(head) is expected
+
+
+def test_carafe_upsamples_and_learns():
+    up = CARAFE(DISTILL_DIM, scale=2)
     x = torch.rand(2, DISTILL_DIM, 5, 5)
     out = up(x)
     assert out.shape == (2, DISTILL_DIM, 10, 10)
-    out.sum().backward()
-    assert up.offset.weight.grad is not None and torch.any(up.offset.weight.grad != 0)
+    (out * torch.rand_like(out)).sum().backward()
+    assert up.enc.weight.grad is not None and torch.any(up.enc.weight.grad != 0)
+
+
+def test_carafe_reassembles_constant_input():
+    """Kernels are softmax-normalized, so a constant map stays constant (away from zero padding)."""
+    up = CARAFE(DISTILL_DIM, scale=2)
+    out = up(torch.full((1, DISTILL_DIM, 9, 9), 3.0))
+    assert torch.allclose(out[..., 4:-4, 4:-4], torch.full_like(out[..., 4:-4, 4:-4], 3.0), atol=1e-5)
 
 
 if __name__ == "__main__":

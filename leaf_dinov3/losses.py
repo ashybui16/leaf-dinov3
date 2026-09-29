@@ -8,25 +8,26 @@ import torch
 import torch.nn.functional as F
 
 
-def normalize_channels(x: torch.Tensor, dim: int = 1) -> torch.Tensor:
-    """L2-normalize `x` along `dim`."""
-    return x / x.norm(dim=dim, keepdim=True).clamp_min(1e-6)
-
-
-def embedding_distill_loss(
-    student_embeds: list[torch.Tensor], teacher_tokens: torch.Tensor
-) -> torch.Tensor:
-    """Per-level SmoothL1 between L2-normalized student embeddings and resized teacher tokens.
+def embedding_distill_loss(student_embeds: list[torch.Tensor], teacher_tokens: torch.Tensor) -> torch.Tensor:
+    """Per-level cosine distance `1 - cos(s, t)` between channel-centered student and teacher.
 
     `student_embeds[i]` is `(B, embed_dim, H_i, W_i)`; `teacher_tokens` is the single teacher
-    grid `(B, embed_dim, H_t, W_t)`, bilinearly resized down to each level (there is no learned
-    projection: the student channel count is forced to equal `embed_dim`).
+    grid `(B, embed_dim, H_t, W_t)` (there is no learned projection: the student channel count
+    is forced to equal `embed_dim`). The student is already on the teacher grid, so the bilinear
+    resize of the teacher is a no-op unless `teacher_input_size` differs from the student's.
+
+    Each side has its per-channel mean over (batch, H, W) subtracted first: a few massive DINOv3
+    channels are near-constant, and uncentered, predicting that shared mean token everywhere
+    already scores 1 - cos ~ 0.33 with no spatial information at all.
     """
     losses = []
     for embed in student_embeds:
         h, w = embed.shape[-2:]
-        teacher = F.interpolate(teacher_tokens, size=(h, w), mode="bilinear", align_corners=False)
-        losses.append(F.smooth_l1_loss(normalize_channels(embed), normalize_channels(teacher)))
+        teacher = F.interpolate(teacher_tokens, size=(h, w), mode="bilinear", align_corners=False).float()
+        embed = embed.float()
+        s = embed - embed.mean(dim=(0, 2, 3), keepdim=True)
+        t = teacher - teacher.mean(dim=(0, 2, 3), keepdim=True)
+        losses.append(1 - F.cosine_similarity(s, t, dim=1).mean())
     return torch.stack(losses).mean()
 
 
@@ -52,11 +53,14 @@ def resize_attention_map(attn: torch.Tensor, in_grid: int, out_grid: int) -> tor
 def attention_distill_loss(
     student_attns: list[torch.Tensor], teacher_attn: torch.Tensor, teacher_grid: int
 ) -> torch.Tensor:
-    """Per-level SmoothL1 between student attention maps and the teacher map resized to each level.
+    """Per-level row-wise KL `sum(t * (log t - log s))` between teacher and student attention.
+
+    Same gradients as the cross-entropy `-sum(t * log s)`, minus the teacher's row entropy (a
+    constant), so the logged value bottoms out at 0 instead of ~6 nats.
 
     `student_attns[i]` is `(B, N_i, N_i)` over a square `sqrt(N_i)` grid; `teacher_attn` is
     `(B, teacher_grid**2, teacher_grid**2)`. Teacher resizes are cached by grid, so levels
-    sharing a grid (P2 resized to P3) share one resize.
+    sharing a grid share one resize (a no-op when the grids already match).
     """
     resized = {}
     losses = []
@@ -65,5 +69,7 @@ def attention_distill_loss(
         if grid not in resized:
             with torch.no_grad():
                 resized[grid] = resize_attention_map(teacher_attn, teacher_grid, grid)
-        losses.append(F.smooth_l1_loss(attn, resized[grid]))
+        t = resized[grid]
+        log_s = attn.float().clamp_min(1e-8).log()
+        losses.append((t * (t.clamp_min(1e-12).log() - log_s)).sum(dim=-1).mean())
     return torch.stack(losses).mean()

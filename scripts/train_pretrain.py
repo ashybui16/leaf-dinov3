@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--teacher-weights", default=None)
     p.add_argument("--teacher-input-size", type=int, default=None)
     p.add_argument("--attn-num-heads", type=int, default=8)
-    p.add_argument("--resize-student", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--learnable-resize-student", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--lambda-distill", type=float, default=1.0)
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch", type=int, default=None)
@@ -169,7 +169,7 @@ def main() -> None:
         teacher_input_size=args.teacher_input_size,
         lambda_distill=args.lambda_distill,
         attn_num_heads=args.attn_num_heads,
-        resize_student=args.resize_student,
+        learnable_resize_student=args.learnable_resize_student,
     )
     trainer.train()
 

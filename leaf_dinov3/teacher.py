@@ -1,8 +1,8 @@
 """Frozen DINOv3 teacher wrapper.
 
-`_ensure_dinov3_on_syspath` runs at import time (not in `__init__`) because this module gets
-unpickled inside ultralytics checkpoints: a finetune/eval/strip process that only *loads* a
-checkpoint containing a `DinoV3Teacher` must still be able to resolve `dinov3.*` submodules
+`_ensure_dinov3_on_syspath` runs at import time (not in `__init__`) because checkpoints saved
+before `DistillDetectionModel.__getstate__` excluded the teacher still pickle a `DinoV3Teacher`:
+a process that only *loads* one of those must still be able to resolve `dinov3.*` submodules
 even though it never calls the constructor.
 """
 
@@ -37,7 +37,7 @@ _DEFAULT_WEIGHTS = {
 }
 
 
-def _load_backbone(variant: str, weights: str | None, pretrained: bool = True):
+def _load_backbone(variant: str, weights: str):
     """Build a DINOv3 backbone via `dinov3.hub.backbones` directly, bypassing `hubconf.py`.
 
     `torch.hub.load(..., source="local")` execs the whole `hubconf.py`, which eagerly imports
@@ -46,15 +46,15 @@ def _load_backbone(variant: str, weights: str | None, pretrained: bool = True):
     """
     from dinov3.hub import backbones
 
-    return getattr(backbones, variant)(weights=weights, pretrained=pretrained)
+    return getattr(backbones, variant)(weights=weights)
 
 
 class _RopeAwareAttention:
     """Picklable replacement for `SelfAttention.compute_attention` that also stashes weights.
 
     A plain closure can't be pickled ("Can't pickle local object"), which broke mid-training
-    checkpoint saves whenever `need_attention=True` (d3): the trainer periodically pickles the
-    whole model, teacher included. Storing the state on a module-level callable instead of a
+    checkpoint saves whenever `need_attention=True` (d3) back when the teacher was pickled into
+    checkpoints; it still lets old teacher-carrying checkpoints unpickle. Storing the state on a module-level callable instead of a
     closure keeps the class trivially picklable; the only reference cycle is `attn <-> self`,
     which pickle's object memoization handles fine.
 
@@ -90,16 +90,11 @@ class DinoV3Teacher(nn.Module):
         input_size: int | None = None,
         weights: str | Path | None = None,
         need_attention: bool = False,
-        pretrained: bool = True,
     ) -> None:
-        """`pretrained=False` skips loading any weight file (random init): only useful when the
-        caller is about to overwrite every parameter anyway, e.g. `DistillFineTuneTrainer`
-        rebuilding a scaffold teacher right before `model.load(checkpoint)` restores its real,
-        already-frozen stage-1 weights regardless of what this constructor loaded."""
         super().__init__()
-        if pretrained and weights is None:
+        if weights is None:
             weights = DINOV3_DIR / "weights" / _DEFAULT_WEIGHTS[variant]
-        self.model = _load_backbone(variant, str(weights) if weights else None, pretrained=pretrained)
+        self.model = _load_backbone(variant, str(weights))
 
         self.variant = variant
         self.input_size = input_size

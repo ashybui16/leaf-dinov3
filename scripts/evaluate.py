@@ -55,7 +55,7 @@ def main() -> None:
     args = parse_args()
     ckpt = torch.load(args.weights, map_location="cpu", weights_only=False)
     model = (ckpt.get("ema") or ckpt["model"]).float()
-    if hasattr(model, "teacher"):  # already-stripped checkpoints have no teacher to remove
+    if getattr(model.model[-1], "distill_dim", 0):  # already-stripped checkpoints have no distill channels
         model.strip_distillation()
     model.eval()
 
