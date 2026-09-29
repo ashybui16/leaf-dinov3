@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch", type=int, default=None)
     p.add_argument("--imgsz", type=int, default=None)
-    p.add_argument("--fraction", type=float, default=None, help="dataset fraction/count; >1 = image count")
+    p.add_argument("--fraction", type=lambda s: int(s) if s.isdigit() else float(s), default=None, help="dataset fraction/count; >1 = image count")
     p.add_argument("--lr0", type=float, default=None)
     p.add_argument("--optimizer", default=None)
     p.add_argument("--cos-lr", action=argparse.BooleanOptionalAction, default=None)
