@@ -9,7 +9,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from leaf_dinov3.heads import CARAFE, DistillDetectD2, DistillDetectD3, _make_resampler  # noqa: E402
+from leaf_dinov3.heads import CARAFE, DistillDetectD2, DistillDetectD3, SelfAttentionMap, _make_resampler  # noqa: E402
 from leaf_dinov3.trainer import _infer_learnable_resize_student  # noqa: E402
 
 DISTILL_DIM = 16
@@ -300,6 +300,21 @@ def test_carafe_reassembles_constant_input():
     up = CARAFE(DISTILL_DIM, scale=2)
     out = up(torch.full((1, DISTILL_DIM, 9, 9), 3.0))
     assert torch.allclose(out[..., 4:-4, 4:-4], torch.full_like(out[..., 4:-4, 4:-4], 3.0), atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CPU autocast is bf16, which can't overflow here")
+def test_self_attention_map_survives_fp16_autocast_overflow():
+    """Pre-scale q.k beyond fp16's 65504 (as a sharpened trained map reaches) must not turn into NaN."""
+    attn = SelfAttentionMap(768, 8).cuda()
+    with torch.no_grad():
+        for lin in (attn.q, attn.k):
+            lin.weight.copy_(torch.eye(768))
+            lin.bias.zero_()
+    x = 30 + torch.rand(2, 16, 768, device="cuda")  # per-head q.k ~ 96 * 30**2 = 86400 > 65504
+    with torch.autocast("cuda"):
+        out = attn(x)
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out.sum(dim=-1), torch.ones(2, 16, device="cuda"))
 
 
 if __name__ == "__main__":

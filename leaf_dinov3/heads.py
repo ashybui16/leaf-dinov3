@@ -168,12 +168,18 @@ class SelfAttentionMap(nn.Module):
         self.k = nn.Linear(dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """`x`: `(B, N, dim)` -> head-averaged attention `(B, N, N)`."""
+        """`x`: `(B, N, dim)` -> head-averaged attention `(B, N, N)`.
+
+        Computed in fp32 with `scale` folded into `q`: the attention-KL term keeps sharpening the
+        map, so q/k grow until an fp16 (AMP) `q @ k^T` overflows to inf and softmax returns NaN.
+        """
         b, n, c = x.shape
         h = self.num_heads
-        q = self.q(x).reshape(b, n, h, c // h).transpose(1, 2)
-        k = self.k(x).reshape(b, n, h, c // h).transpose(1, 2)
-        attn = (q @ k.transpose(-2, -1) * self.scale).softmax(dim=-1)
+        with torch.autocast(x.device.type, enabled=False):
+            x = x.float()
+            q = self.q(x).reshape(b, n, h, c // h).transpose(1, 2) * self.scale
+            k = self.k(x).reshape(b, n, h, c // h).transpose(1, 2)
+            attn = (q @ k.transpose(-2, -1)).softmax(dim=-1)
         return attn.mean(dim=1)
 
 
